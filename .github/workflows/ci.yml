@@ -1,0 +1,105 @@
+# CI pipeline — implements the stages defined in docs/35-DEPLOYMENT-AND-CI-CD.md §4.
+#
+# Every gate here is mandatory for main-branch merges: lint, typecheck, tests, build,
+# security scans and the migration check. A skipped step is a false claim of safety.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: servicehub
+          POSTGRES_PASSWORD: servicehub
+          POSTGRES_DB: servicehub_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U servicehub"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://servicehub:servicehub@localhost:5432/servicehub_test?schema=public
+      REDIS_URL: redis://localhost:6379
+      CORS_ORIGIN: http://localhost:5173
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run prisma:generate
+      - name: Migration check (applies cleanly on a scratch database)
+        run: npm run prisma:migrate:deploy
+      - run: npm test
+      - run: npm run build
+
+      # Blocks high/critical findings. A time-boxed exception must be explicit.
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Backstop only. The control is that secrets are never committed.
+      - name: Scan for committed credentials
+        run: |
+          if git grep -nEI '(SECRET|PASSWORD|TOKEN|API_KEY)[[:space:]]*[:=][[:space:]]*["'\'']?[A-Za-z0-9/_+-]{16,}' \
+             -- ':!*.example' ':!*.md' ':!docs/*' ':!package-lock.json'; then
+            echo "::error::Possible committed secret detected."
+            exit 1
+          fi

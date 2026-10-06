@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Environment — never commit real values
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+logs/
+
+# Test output
+coverage/
+playwright-report/
+test-results/
+.vitest/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Prisma local artefacts
+backend/prisma/*.db
+backend/prisma/*.db-journal

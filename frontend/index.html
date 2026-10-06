@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="ServiceHub — enterprise service management platform" />
+    <!--
+      A restrictive referrer policy and no external resource loading: the app must not
+      leak record identifiers in the Referer header (docs/17).
+    -->
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <title>ServiceHub</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>
+      ServiceHub requires JavaScript. If you are seeing this message, enable JavaScript in your
+      browser or contact your service desk.
+    </noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

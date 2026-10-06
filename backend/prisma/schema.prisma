@@ -1,0 +1,1145 @@
+// ServiceHub database schema — PostgreSQL + Prisma.
+//
+// The entity model, fields, relationships and invariants are owned by
+// docs/08-DATA-MODEL.md; constraints and indexes by docs/09; schema evolution by
+// docs/10. Models are added ONLY as their owning documents reach `Approved` at the
+// phase gate (docs/40).
+//
+// This file currently holds the **platform spine slice** (docs/05 build order
+// F-01..F-03): tenancy, identity, authorization, teams, audit and the async outbox.
+// Domain entities (catalog, requests, incidents, tasks, SLA, approvals, notifications)
+// are added in the following increments.
+//
+// Conventions (docs/08 §1):
+//   - primary keys: opaque, sortable, non-guessable — UUIDv7
+//   - timestamps: `createdAt`/`updatedAt` as `timestamptz`, always UTC
+//   - naming: snake_case in the database via @map / @@map, camelCase in code
+//   - scope: `organizationId` on tenant-scoped tables, a FK to `Organization`
+//     (ADR-0002, ADR-0012); nullable only for a platform operator
+//   - audit-facing entities are never hard-deleted; retirement is a status change
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums (docs/08 §1: PostgreSQL enum for stable, code-coupled sets)
+// ---------------------------------------------------------------------------
+
+enum OrganizationStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ActorType {
+  USER
+  SERVICE
+  SYSTEM
+}
+
+enum TeamMemberRole {
+  MEMBER
+  LEAD
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  DEAD
+}
+
+/// Shared work priority (docs/08 §4.1). Used by requests, incidents and SLA targets.
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+/// The service-request state machine (docs/22 §3). Terminal states are CLOSED and
+/// CANCELLED; nothing transitions out of them (rule R7).
+enum RequestStatus {
+  NEW
+  TRIAGED
+  APPROVAL_PENDING
+  APPROVED
+  REJECTED
+  IN_PROGRESS
+  FULFILLED
+  CLOSED
+  CANCELLED
+}
+
+/// Comment audience (docs/22 §6). Internal notes are never visible to a requester.
+enum CommentVisibility {
+  PUBLIC
+  INTERNAL
+}
+
+/// Incident impact (docs/23 §3). Paired with urgency to derive priority.
+enum IncidentImpact {
+  EXTENSIVE
+  SIGNIFICANT
+  MINOR
+}
+
+/// Incident urgency (docs/23 §3).
+enum IncidentUrgency {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+/// The incident state machine (docs/23 §4). CLOSED is terminal; RESOLVED can reopen.
+enum IncidentStatus {
+  NEW
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy root (ADR-0012 / D-9)
+// ---------------------------------------------------------------------------
+
+/// The tenant root. Every tenant-scoped row's `organizationId` references this.
+model Organization {
+  id              String             @id @default(uuid(7))
+  name            String
+  /// lower(name); a functional unique index is not expressible in Prisma, so the
+  /// normalised key is stored and made unique (docs/08 §5).
+  nameKey         String             @unique @map("name_key")
+  slug            String             @unique
+  status          OrganizationStatus @default(ACTIVE)
+  defaultTimeZone String             @default("UTC") @map("default_time_zone")
+  createdAt       DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  users       User[]
+  roles       Role[]
+  teams       Team[]
+  invitations Invitation[]
+  auditLogs   AuditLog[]
+  outbox      Outbox[]
+  jobs        JobRecord[]
+
+  categories         Category[]
+  catalogItems       CatalogItem[]
+  businessCalendars  BusinessCalendar[]
+  slaPolicies        SlaPolicy[]
+  slaClocks          SlaClock[]
+  serviceRequests    ServiceRequest[]
+  comments           Comment[]
+  referenceSequences ReferenceSequence[]
+  incidents          Incident[]
+  tasks              Task[]
+  approvalTemplates  ApprovalTemplate[]
+  approvalWorkflows  ApprovalWorkflow[]
+  approvalDecisions  ApprovalDecision[]
+  notifications      Notification[]
+  reportExports      ReportExport[]
+
+  @@map("organizations")
+}
+
+// ---------------------------------------------------------------------------
+// Identity (docs/06)
+// ---------------------------------------------------------------------------
+
+model User {
+  id String @id @default(uuid(7))
+
+  /// Null = a platform operator (belongs to no tenant). Required otherwise.
+  organizationId String?    @map("organization_id")
+  /// Stored normalised lower-case (docs/12 §3), so a plain unique index is
+  /// case-insensitive in effect (docs/09 §2).
+  email          String     @unique
+  displayName    String     @map("display_name")
+  status         UserStatus @default(ACTIVE)
+  timeZone       String     @default("UTC") @map("time_zone")
+  createdAt      DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization            Organization?            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  credential              Credential?
+  sessions                Session[]
+  passwordResetTokens     PasswordResetToken[]
+  userRoles               UserRole[]
+  teamMemberships         TeamMember[]
+  invitationsSent         Invitation[]             @relation("InvitationInvitedBy")
+  invitationsAccepted     Invitation[]             @relation("InvitationAcceptedBy")
+  auditLogs               AuditLog[]
+  requestsRequested       ServiceRequest[]         @relation("RequestRequester")
+  requestsAssigned        ServiceRequest[]         @relation("RequestAssignee")
+  comments                Comment[]
+  incidentsReported       Incident[]               @relation("IncidentReporter")
+  incidentsAssigned       Incident[]               @relation("IncidentAssignee")
+  tasksAssigned           Task[]                   @relation("TaskAssignee")
+  tasksCreated            Task[]                   @relation("TaskCreator")
+  approvalAssignments     ApprovalStepApprover[]
+  approvalDecisions       ApprovalDecision[]
+  notifications           Notification[]
+  notificationPreferences NotificationPreference[]
+  reportExports           ReportExport[]
+
+  @@index([organizationId])
+  @@map("users")
+}
+
+/// Password hash and policy/lockout state. One per user.
+model Credential {
+  id                String    @id @default(uuid(7))
+  userId            String    @unique @map("user_id")
+  /// Argon2id hash. Plaintext is never persisted (docs/06 §4).
+  passwordHash      String    @map("password_hash")
+  passwordChangedAt DateTime  @default(now()) @map("password_changed_at") @db.Timestamptz(6)
+  failedAttempts    Int       @default(0) @map("failed_attempts")
+  lockedUntil       DateTime? @map("locked_until") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("credentials")
+}
+
+/// Server-side session (ADR-0001). The Redis copy is a fast lookup; this row is the
+/// durable, revocable record.
+model Session {
+  id                String    @id @default(uuid(7))
+  userId            String    @map("user_id")
+  /// Hash of the opaque, >=128-bit session token; the raw value is never stored.
+  tokenHash         String    @unique @map("token_hash")
+  csrfSecretHash    String?   @map("csrf_secret_hash")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastSeenAt        DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  idleExpiresAt     DateTime  @map("idle_expires_at") @db.Timestamptz(6)
+  absoluteExpiresAt DateTime  @map("absolute_expires_at") @db.Timestamptz(6)
+  revokedAt         DateTime? @map("revoked_at") @db.Timestamptz(6)
+  sourceIp          String?   @map("source_ip")
+  userAgent         String?   @map("user_agent")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+/// Single-use password-reset token (hashed). Distinct from `Invitation`.
+model PasswordResetToken {
+  id        String    @id @default(uuid(7))
+  userId    String    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+/// Single-use onboarding token (hashed) that ESTABLISHES a first credential
+/// (docs/06 §11, ADR-0012). Distinct from `PasswordResetToken`.
+model Invitation {
+  id             String    @id @default(uuid(7))
+  organizationId String    @map("organization_id")
+  email          String
+  roleId         String    @map("role_id")
+  tokenHash      String    @unique @map("token_hash")
+  invitedById    String    @map("invited_by_id")
+  acceptedById   String?   @map("accepted_by_id")
+  expiresAt      DateTime  @map("expires_at") @db.Timestamptz(6)
+  acceptedAt     DateTime? @map("accepted_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  role         Role         @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  invitedBy    User         @relation("InvitationInvitedBy", fields: [invitedById], references: [id], onDelete: Restrict)
+  acceptedBy   User?        @relation("InvitationAcceptedBy", fields: [acceptedById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, email])
+  @@map("invitations")
+}
+
+// ---------------------------------------------------------------------------
+// Authorization (docs/07)
+// ---------------------------------------------------------------------------
+
+/// A role. `organizationId` null = a platform-scoped role (Super Admin); otherwise
+/// the role belongs to one tenant and is seeded at provisioning (ADR-0012, `07` §3).
+model Role {
+  id             String   @id @default(uuid(7))
+  organizationId String?  @map("organization_id")
+  /// Stable machine key, e.g. SUPER_ADMIN, ADMINISTRATOR, AGENT.
+  key            String
+  name           String
+  description    String?
+  /// System roles are seeded reference data and not deletable through the API.
+  isSystem       Boolean  @default(false) @map("is_system")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization    Organization?    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+  invitations     Invitation[]
+
+  @@unique([organizationId, key])
+  @@index([organizationId])
+  @@map("roles")
+}
+
+/// The global permission vocabulary (docs/07 §1, docs/10 §8 reference data).
+model Permission {
+  id          String   @id @default(uuid(7))
+  /// Permission key, e.g. `request:create`. Stable; never renamed (docs/11 §4 logic).
+  key         String   @unique
+  resource    String
+  action      String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String   @id @default(uuid(7))
+  roleId       String   @map("role_id")
+  permissionId String   @map("permission_id")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+/// Grants a role to a user. Roles are additive (union) — docs/07 §2.
+model UserRole {
+  id             String   @id @default(uuid(7))
+  userId         String   @map("user_id")
+  roleId         String   @map("role_id")
+  /// Denormalised tenant scope so the grant itself is index-scoped (docs/09 §8).
+  organizationId String?  @map("organization_id")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@index([organizationId, userId])
+  @@map("user_roles")
+}
+
+// ---------------------------------------------------------------------------
+// Teams (docs/07, F-02)
+// ---------------------------------------------------------------------------
+
+model Team {
+  id             String   @id @default(uuid(7))
+  organizationId String   @map("organization_id")
+  name           String
+  description    String?
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  members         TeamMember[]
+  catalogItems    CatalogItem[]
+  serviceRequests ServiceRequest[]
+  incidents       Incident[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("teams")
+}
+
+model TeamMember {
+  id             String         @id @default(uuid(7))
+  teamId         String         @map("team_id")
+  userId         String         @map("user_id")
+  organizationId String         @map("organization_id")
+  role           TeamMemberRole @default(MEMBER)
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@index([organizationId, userId])
+  @@map("team_members")
+}
+
+// ---------------------------------------------------------------------------
+// Platform spine: audit + outbox + jobs (docs/31, docs/29, docs/13 §7)
+// ---------------------------------------------------------------------------
+
+/// Append-only. No `updatedAt`, no delete path — the absence is the control
+/// (docs/31 §3.3). The trigger and grants that enforce it are added by migration.
+model AuditLog {
+  id             String    @id @default(uuid(7))
+  organizationId String?   @map("organization_id")
+  occurredAt     DateTime  @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  actorId        String?   @map("actor_id")
+  actorType      ActorType @map("actor_type")
+  /// Dotted namespace, e.g. `request.status.change`, `platform.bootstrap`.
+  action         String
+  entityType     String    @map("entity_type")
+  entityId       String?   @map("entity_id")
+  before         Json?
+  after          Json?
+  /// Required for overrides.
+  reason         String?
+  correlationId  String    @map("correlation_id")
+  sourceIp       String?   @map("source_ip")
+  userAgent      String?   @map("user_agent")
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  actor        User?         @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, entityType, entityId, occurredAt])
+  @@index([organizationId, actorId, occurredAt])
+  @@index([correlationId])
+  @@map("audit_logs")
+}
+
+/// The transactional outbox: written in the SAME transaction as the mutation, drained
+/// afterwards (docs/13 §7, docs/29 §3).
+model Outbox {
+  id             String    @id @default(uuid(7))
+  organizationId String?   @map("organization_id")
+  eventType      String    @map("event_type")
+  payload        Json
+  idempotencyKey String    @unique @map("idempotency_key")
+  occurredAt     DateTime  @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  processedAt    DateTime? @map("processed_at") @db.Timestamptz(6)
+  attempts       Int       @default(0)
+  lastError      String?   @map("last_error")
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([processedAt, occurredAt])
+  @@map("outbox")
+}
+
+/// Durable async work record (docs/13 §8).
+model JobRecord {
+  id             String    @id @default(uuid(7))
+  organizationId String?   @map("organization_id")
+  type           String
+  version        String
+  idempotencyKey String    @unique @map("idempotency_key")
+  status         JobStatus @default(QUEUED)
+  payload        Json
+  attempts       Int       @default(0)
+  maxAttempts    Int       @default(5) @map("max_attempts")
+  scheduledFor   DateTime? @map("scheduled_for") @db.Timestamptz(6)
+  lastAttemptAt  DateTime? @map("last_attempt_at") @db.Timestamptz(6)
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+  lastError      String?   @map("last_error")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([status, lastAttemptAt])
+  @@map("job_records")
+}
+
+// ---------------------------------------------------------------------------
+// Notifications (docs/29, F-12)
+// ---------------------------------------------------------------------------
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  IN_APP
+}
+
+/// PENDING → SENT → DELIVERED, or → FAILED → (retry) / → DEAD. SKIPPED records a
+/// recipient suppressed at send time (docs/29 §14).
+enum NotificationStatus {
+  PENDING
+  SENT
+  DELIVERED
+  FAILED
+  DEAD
+  SKIPPED
+}
+
+/// The per-recipient delivery record (docs/29 §9). The outbox row is the domain event;
+/// this is what a worker actually sent, to whom, and with which template version. The
+/// `dedupeKey` is `(eventId, recipient, channel)` (`docs/29` N3), so redelivering an event
+/// cannot produce a visible duplicate.
+model Notification {
+  id                String              @id @default(uuid(7))
+  organizationId    String?             @map("organization_id")
+  /// The recipient identity, when one is resolved; null for an external address only.
+  userId            String?             @map("user_id")
+  /// The concrete destination (email address or user id for IN_APP).
+  recipient         String
+  channel           NotificationChannel @default(EMAIL)
+  eventType         String              @map("event_type")
+  /// The template version used (`docs/29` N9, acceptance 6).
+  templateVersion   String              @map("template_version")
+  status            NotificationStatus  @default(PENDING)
+  providerMessageId String?             @map("provider_message_id")
+  dedupeKey         String              @unique @map("dedupe_key")
+  attempts          Int                 @default(0)
+  sentAt            DateTime?           @map("sent_at") @db.Timestamptz(6)
+  deliveredAt       DateTime?           @map("delivered_at") @db.Timestamptz(6)
+  failureReason     String?             @map("failure_reason")
+  /// In-app content (`docs/29` §12). Null for non-`IN_APP` channels.
+  title             String?
+  body              String?
+  linkUrl           String?             @map("link_url")
+  /// When an `IN_APP` notification was read; null means unread.
+  readAt            DateTime?           @map("read_at") @db.Timestamptz(6)
+  createdAt         DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status])
+  @@index([status, createdAt])
+  @@index([userId, channel, readAt, createdAt])
+  @@map("notifications")
+}
+
+/// Per-user, per-event, per-channel opt-out (`docs/29` §7). Absent means the default
+/// (enabled). Transactional events ignore their preference (`29` N6) — the service rule
+/// refuses a preference row that would silence one.
+model NotificationPreference {
+  id        String              @id @default(uuid(7))
+  userId    String              @map("user_id")
+  eventType String              @map("event_type")
+  channel   NotificationChannel
+  enabled   Boolean             @default(true)
+  createdAt DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, eventType, channel])
+  @@index([userId])
+  @@map("notification_preferences")
+}
+
+// ---------------------------------------------------------------------------
+// Report exports (docs/30 §3.1/§3.4, F-14)
+// ---------------------------------------------------------------------------
+
+enum ReportExportStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+/// An async report export (`docs/30` §3.1: period/ad-hoc analysis runs as a job and
+/// produces a time-limited download). The content is stored inline for v1 (see `CR-0003`);
+/// the shape allows a storage key to replace it when the object store lands (`ADR-0004`).
+model ReportExport {
+  id             String             @id @default(uuid(7))
+  organizationId String             @map("organization_id")
+  requestedById  String             @map("requested_by_id")
+  metric         String
+  /// The filters the export was run with, recorded on the export itself (`30` §3.2 R5).
+  params         Json               @default("{}")
+  format         String             @default("CSV")
+  status         ReportExportStatus @default(QUEUED)
+  rowCount       Int                @default(0) @map("row_count")
+  /// The rendered CSV. Inline in v1 (`CR-0003`).
+  content        String?
+  error          String?
+  expiresAt      DateTime?          @map("expires_at") @db.Timestamptz(6)
+  createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  completedAt    DateTime?          @map("completed_at") @db.Timestamptz(6)
+  updatedAt      DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  requestedBy  User         @relation(fields: [requestedById], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+  @@index([requestedById, status])
+  @@index([status, createdAt])
+  @@map("report_exports")
+}
+
+// ---------------------------------------------------------------------------
+// Service Catalog (docs/21, F-04)
+// ---------------------------------------------------------------------------
+
+enum CatalogItemStatus {
+  DRAFT
+  ACTIVE
+  RETIRED
+}
+
+enum CatalogFieldType {
+  TEXT
+  LONG_TEXT
+  NUMBER
+  DATE
+  DATETIME
+  SELECT
+  MULTI_SELECT
+  BOOLEAN
+  FILE
+  USER
+}
+
+/// Hierarchical grouping of catalog items (docs/21 §3). Nesting is bounded to three
+/// levels by the service (rule C7) — a depth constraint Prisma cannot express.
+model Category {
+  id             String   @id @default(uuid(7))
+  organizationId String   @map("organization_id")
+  parentId       String?  @map("parent_id")
+  name           String
+  description    String?
+  displayOrder   Int      @default(0) @map("display_order")
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  parent       Category?     @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children     Category[]    @relation("CategoryTree")
+  items        CatalogItem[]
+
+  @@unique([organizationId, parentId, name])
+  @@index([organizationId, parentId])
+  @@map("categories")
+}
+
+/// A requestable service definition (docs/21 §3). Retirement is a status change, never
+/// a delete — requests referencing a retired item stay valid and readable (rule C5).
+model CatalogItem {
+  id                 String            @id @default(uuid(7))
+  organizationId     String            @map("organization_id")
+  categoryId         String            @map("category_id")
+  name               String
+  description        String?
+  defaultPriority    Priority          @default(MEDIUM) @map("default_priority")
+  defaultSlaPolicyId String?           @map("default_sla_policy_id")
+  fulfilmentTeamId   String?           @map("fulfilment_team_id")
+  status             CatalogItemStatus @default(DRAFT)
+  requiresApproval   Boolean           @default(false) @map("requires_approval")
+  createdAt          DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization     Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category         Category           @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  defaultSlaPolicy SlaPolicy?         @relation(fields: [defaultSlaPolicyId], references: [id], onDelete: Restrict)
+  fulfilmentTeam   Team?              @relation(fields: [fulfilmentTeamId], references: [id], onDelete: Restrict)
+  fields           CatalogItemField[]
+  requests         ServiceRequest[]
+  approvalTemplate ApprovalTemplate?
+
+  @@unique([organizationId, categoryId, name])
+  @@index([organizationId, status])
+  @@map("catalog_items")
+}
+
+/// A typed input on an item's request form (docs/21 §3, §3 field types).
+/// `key` is unique within the item and immutable after first use (rule C2).
+model CatalogItemField {
+  id            String           @id @default(uuid(7))
+  catalogItemId String           @map("catalog_item_id")
+  key           String
+  label         String
+  fieldType     CatalogFieldType @map("field_type")
+  isRequired    Boolean          @default(false) @map("is_required")
+  options       Json?
+  validation    Json?
+  helpText      String?          @map("help_text")
+  displayOrder  Int              @default(0) @map("display_order")
+  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  catalogItem CatalogItem @relation(fields: [catalogItemId], references: [id], onDelete: Cascade)
+
+  @@unique([catalogItemId, key])
+  @@index([catalogItemId, displayOrder])
+  @@map("catalog_item_fields")
+}
+
+// ---------------------------------------------------------------------------
+// SLA policies, calendars and clocks (docs/25, F-08)
+// ---------------------------------------------------------------------------
+
+enum SlaCalendarModel {
+  WORKING_HOURS
+  WALL_CLOCK
+}
+
+enum SlaClockState {
+  ON_TRACK
+  AT_RISK
+  BREACHED
+  PAUSED
+  STOPPED
+}
+
+/// Working week, hours, holidays and the time zone they are defined in (docs/25 §2,
+/// §4). Editing a calendar is a new version; in-flight records keep theirs (rule 4.6).
+model BusinessCalendar {
+  id             String           @id @default(uuid(7))
+  organizationId String           @map("organization_id")
+  name           String
+  timeZone       String           @map("time_zone")
+  model          SlaCalendarModel @default(WORKING_HOURS)
+  /// Working hours per weekday, e.g. { "mon": [{ "start": "09:00", "end": "17:00" }] }.
+  workingHours   Json             @map("working_hours")
+  /// Holiday dates as ISO `YYYY-MM-DD` strings.
+  holidays       Json             @default("[]")
+  version        Int              @default(1)
+  isActive       Boolean          @default(true) @map("is_active")
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  slaPolicies  SlaPolicy[]
+
+  @@unique([organizationId, name, version])
+  @@index([organizationId])
+  @@map("business_calendars")
+}
+
+/// A named set of targets bound to one business calendar (docs/25 §2, ADR-0008).
+model SlaPolicy {
+  id             String   @id @default(uuid(7))
+  organizationId String   @map("organization_id")
+  name           String
+  calendarId     String   @map("calendar_id")
+  /// Statuses during which the clock does not run, e.g. ["APPROVAL_PENDING"].
+  pauseStates    Json     @default("[]") @map("pause_states")
+  isActive       Boolean  @default(true) @map("is_active")
+  isDefault      Boolean  @default(false) @map("is_default")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  calendar     BusinessCalendar @relation(fields: [calendarId], references: [id], onDelete: Restrict)
+  targets      SlaTarget[]
+  clocks       SlaClock[]
+  catalogItems CatalogItem[]
+  requests     ServiceRequest[]
+  incidents    Incident[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, isActive])
+  @@map("sla_policies")
+}
+
+/// Response/resolution minutes for one priority, plus the warn threshold (docs/25 §2).
+model SlaTarget {
+  id              String   @id @default(uuid(7))
+  slaPolicyId     String   @map("sla_policy_id")
+  priority        Priority
+  responseMinutes Int      @map("response_minutes")
+  resolveMinutes  Int      @map("resolve_minutes")
+  /// The percentage of the resolve target at which a record becomes AT_RISK.
+  warnPercent     Int      @default(75) @map("warn_percent")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  slaPolicy SlaPolicy @relation(fields: [slaPolicyId], references: [id], onDelete: Cascade)
+
+  @@unique([slaPolicyId, priority])
+  @@map("sla_targets")
+}
+
+/// Per-record clock state (docs/25 §3). `state` is a derived cache rewritten by the
+/// sweep; it is never editable through the API (docs/25 §5).
+model SlaClock {
+  id                 String        @id @default(uuid(7))
+  organizationId     String        @map("organization_id")
+  entityType         String        @map("entity_type")
+  entityId           String        @map("entity_id")
+  slaPolicyId        String        @map("sla_policy_id")
+  priority           Priority
+  cycle              Int           @default(1)
+  startedAt          DateTime      @map("started_at") @db.Timestamptz(6)
+  pausedAt           DateTime?     @map("paused_at") @db.Timestamptz(6)
+  totalPausedSeconds Int           @default(0) @map("total_paused_seconds")
+  targetAt           DateTime      @map("target_at") @db.Timestamptz(6)
+  warnAt             DateTime      @map("warn_at") @db.Timestamptz(6)
+  breachedAt         DateTime?     @map("breached_at") @db.Timestamptz(6)
+  stoppedAt          DateTime?     @map("stopped_at") @db.Timestamptz(6)
+  state              SlaClockState @default(ON_TRACK)
+  createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  slaPolicy    SlaPolicy    @relation(fields: [slaPolicyId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, entityType, entityId])
+  @@index([state, targetAt])
+  @@index([organizationId, startedAt])
+  @@map("sla_clocks")
+}
+
+// ---------------------------------------------------------------------------
+// Service requests (docs/22, F-05)
+// ---------------------------------------------------------------------------
+
+/// A unit of work raised from the catalog. Separate from `Incident` by design (docs/08
+/// §3): the two share a shape but differ in lifecycle, priority derivation and reporting.
+model ServiceRequest {
+  id             String        @id @default(uuid(7))
+  organizationId String        @map("organization_id")
+  /// Human-readable, unique per tenant (`REQ-2026-000123`), generated under a retry-safe
+  /// atomic counter (docs/22 §4).
+  reference      String
+  catalogItemId  String        @map("catalog_item_id")
+  requesterId    String        @map("requester_id")
+  assigneeId     String?       @map("assignee_id")
+  teamId         String?       @map("team_id")
+  status         RequestStatus @default(NEW)
+  priority       Priority      @default(MEDIUM)
+  title          String
+  description    String?
+  /// Resolved at creation and frozen thereafter (docs/08 §4.1, docs/22 §8).
+  slaPolicyId    String        @map("sla_policy_id")
+  /// Snapshot of the catalog item's fields at creation (rule C3), so editing the item
+  /// later never rewrites the meaning of these answers.
+  fieldSnapshot  Json          @default("[]") @map("field_snapshot")
+  submittedAt    DateTime      @default(now()) @map("submitted_at") @db.Timestamptz(6)
+  resolvedAt     DateTime?     @map("resolved_at") @db.Timestamptz(6)
+  closedAt       DateTime?     @map("closed_at") @db.Timestamptz(6)
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization     Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  catalogItem      CatalogItem         @relation(fields: [catalogItemId], references: [id], onDelete: Restrict)
+  requester        User                @relation("RequestRequester", fields: [requesterId], references: [id], onDelete: Restrict)
+  assignee         User?               @relation("RequestAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  team             Team?               @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  slaPolicy        SlaPolicy           @relation(fields: [slaPolicyId], references: [id], onDelete: Restrict)
+  fieldValues      RequestFieldValue[]
+  approvalWorkflow ApprovalWorkflow?
+
+  @@unique([organizationId, reference])
+  @@index([organizationId, status, createdAt])
+  @@index([organizationId, requesterId, createdAt])
+  @@index([organizationId, assigneeId, status])
+  @@map("service_requests")
+}
+
+/// A captured answer to a catalog field. `fieldKey`/`fieldLabel`/`fieldType` are the
+/// snapshot (rule C3/C9): the request stays readable even if the field is later removed.
+model RequestFieldValue {
+  id           String           @id @default(uuid(7))
+  requestId    String           @map("request_id")
+  fieldKey     String           @map("field_key")
+  fieldLabel   String           @map("field_label")
+  fieldType    CatalogFieldType @map("field_type")
+  value        Json?
+  displayOrder Int              @default(0) @map("display_order")
+  createdAt    DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  request ServiceRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@unique([requestId, fieldKey])
+  @@map("request_field_values")
+}
+
+/// Conversation attached to any record by `(entityType, entityId)` (docs/22 §6, docs/08
+/// §3 shared child-table design). Internal notes are never returned to a requester.
+model Comment {
+  id             String            @id @default(uuid(7))
+  organizationId String            @map("organization_id")
+  entityType     String            @map("entity_type")
+  entityId       String            @map("entity_id")
+  authorId       String            @map("author_id")
+  visibility     CommentVisibility @default(PUBLIC)
+  body           String
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  author       User         @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, entityType, entityId, createdAt])
+  @@map("comments")
+}
+
+/// Atomic per-(tenant, type, period) counter for reference generation (docs/22 §4). A
+/// read-then-write `max()+1` is a race; an atomic increment on a unique row is not.
+model ReferenceSequence {
+  id             String   @id @default(uuid(7))
+  organizationId String   @map("organization_id")
+  type           String
+  period         String
+  value          Int      @default(0)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, type, period])
+  @@map("reference_sequences")
+}
+
+// ---------------------------------------------------------------------------
+// Incidents (docs/23, F-06)
+// ---------------------------------------------------------------------------
+
+/// Something that is broken, as opposed to a request (something someone wants). Priority
+/// is **derived** from impact × urgency (docs/23 §3), never freely chosen; it may be
+/// overridden only with a permission, a reason and an audit record. Separate from
+/// `ServiceRequest` by design (docs/08 §3).
+model Incident {
+  id                String          @id @default(uuid(7))
+  organizationId    String          @map("organization_id")
+  reference         String
+  title             String
+  description       String
+  impact            IncidentImpact
+  urgency           IncidentUrgency
+  priority          Priority
+  isMajor           Boolean         @default(false) @map("is_major")
+  status            IncidentStatus  @default(NEW)
+  reporterId        String          @map("reporter_id")
+  assigneeId        String?         @map("assignee_id")
+  teamId            String?         @map("team_id")
+  /// Required to RESOLVED; a CHECK constraint enforces it at the database (docs/09 §2).
+  resolutionSummary String?         @map("resolution_summary")
+  slaPolicyId       String          @map("sla_policy_id")
+  reopenCount       Int             @default(0) @map("reopen_count")
+  resolvedAt        DateTime?       @map("resolved_at") @db.Timestamptz(6)
+  closedAt          DateTime?       @map("closed_at") @db.Timestamptz(6)
+  createdAt         DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  reporter     User         @relation("IncidentReporter", fields: [reporterId], references: [id], onDelete: Restrict)
+  assignee     User?        @relation("IncidentAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  team         Team?        @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  slaPolicy    SlaPolicy    @relation(fields: [slaPolicyId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, reference])
+  @@index([organizationId, status, createdAt])
+  @@index([organizationId, reporterId, createdAt])
+  @@index([organizationId, assigneeId, status])
+  @@index([organizationId, isMajor])
+  @@map("incidents")
+}
+
+// ---------------------------------------------------------------------------
+// Tasks (docs/24, F-07)
+// ---------------------------------------------------------------------------
+
+/// The task state machine (docs/24 §3). BLOCKED is bidirectional with IN_PROGRESS;
+/// DONE and CANCELLED are terminal.
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  BLOCKED
+  DONE
+  CANCELLED
+}
+
+/// A task's parent. Polymorphic by design (`docs/08` §3): a task belongs to a request OR
+/// an incident, and the `(parentType, parentId)` pair is the only link — there is no FK,
+/// so validity is a service rule (rule T1).
+enum TaskParentType {
+  REQUEST
+  INCIDENT
+}
+
+/// A unit of work split from a parent request or incident (docs/24). Tasks have no SLA of
+/// their own in v1 — the parent's clock is the commitment (rule T3) — and they roll up:
+/// a parent cannot be fulfilled/resolved with open children unless an override is recorded
+/// (§4).
+model Task {
+  id             String         @id @default(uuid(7))
+  organizationId String         @map("organization_id")
+  parentType     TaskParentType @map("parent_type")
+  parentId       String         @map("parent_id")
+  title          String
+  description    String?
+  status         TaskStatus     @default(TODO)
+  assigneeId     String?        @map("assignee_id")
+  createdById    String         @map("created_by_id")
+  dueAt          DateTime?      @map("due_at") @db.Timestamptz(6)
+  completedAt    DateTime?      @map("completed_at") @db.Timestamptz(6)
+  /// Required while BLOCKED; a CHECK constraint enforces it at the database (docs/24 §3).
+  blockedReason  String?        @map("blocked_reason")
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  assignee     User?        @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  createdBy    User         @relation("TaskCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, parentType, parentId, status])
+  @@index([organizationId, assigneeId, status])
+  @@index([organizationId, status, dueAt])
+  @@map("tasks")
+}
+
+// ---------------------------------------------------------------------------
+// Approvals (docs/26, F-09)
+// ---------------------------------------------------------------------------
+
+/// How a step is satisfied (`docs/26` §3): ANY — one approval suffices; ALL — every
+/// designated approver must approve.
+enum ApprovalMode {
+  ANY
+  ALL
+}
+
+enum ApprovalStepStatus {
+  PENDING
+  ACTIVE
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+enum ApprovalWorkflowStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+/// A decision outcome. There is no "withdraw": a reversal is a new workflow, because an
+/// approval that can be quietly taken back is not an approval (`docs/26` §2).
+enum ApprovalDecisionOutcome {
+  APPROVE
+  REJECT
+}
+
+/// A reusable approver plan for one catalog item (`docs/26` §3, §11). Steps are ordered
+/// and strictly sequential.
+model ApprovalTemplate {
+  id             String   @id @default(uuid(7))
+  organizationId String   @map("organization_id")
+  catalogItemId  String   @unique @map("catalog_item_id")
+  name           String
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  catalogItem  CatalogItem            @relation(fields: [catalogItemId], references: [id], onDelete: Cascade)
+  steps        ApprovalTemplateStep[]
+
+  @@map("approval_templates")
+}
+
+/// One step of a template. Approvers are named by **role key** here and resolved to users
+/// at instantiation, so a later role edit cannot silently change who was asked.
+model ApprovalTemplateStep {
+  id              String       @id @default(uuid(7))
+  templateId      String       @map("template_id")
+  stepOrder       Int          @map("step_order")
+  mode            ApprovalMode
+  approverRoleKey String       @map("approver_role_key")
+  createdAt       DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  template ApprovalTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@unique([templateId, stepOrder])
+  @@map("approval_template_steps")
+}
+
+/// One live workflow per record (`docs/26` rule A1).
+model ApprovalWorkflow {
+  id               String                 @id @default(uuid(7))
+  organizationId   String                 @map("organization_id")
+  requestId        String                 @unique @map("request_id")
+  status           ApprovalWorkflowStatus @default(PENDING)
+  currentStepOrder Int                    @default(1) @map("current_step_order")
+  createdAt        DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  completedAt      DateTime?              @map("completed_at") @db.Timestamptz(6)
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  request      ServiceRequest     @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  steps        ApprovalStep[]
+  decisions    ApprovalDecision[]
+
+  @@index([organizationId, status])
+  @@map("approval_workflows")
+}
+
+/// One step of a live workflow. Status moves PENDING → ACTIVE → COMPLETED, or → REJECTED
+/// /CANCELLED. Exactly one step is ACTIVE at a time (steps are sequential).
+model ApprovalStep {
+  id         String             @id @default(uuid(7))
+  workflowId String             @map("workflow_id")
+  stepOrder  Int                @map("step_order")
+  mode       ApprovalMode
+  status     ApprovalStepStatus @default(PENDING)
+  deadlineAt DateTime?          @map("deadline_at") @db.Timestamptz(6)
+  createdAt  DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  workflow  ApprovalWorkflow       @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  approvers ApprovalStepApprover[]
+  decisions ApprovalDecision[]
+
+  @@unique([workflowId, stepOrder])
+  @@index([status, deadlineAt])
+  @@map("approval_steps")
+}
+
+/// The **snapshot** of who may decide a step (`docs/26` rule A2). Resolving approvers
+/// lazily at decision time would let a role change mid-workflow rewrite who was asked.
+model ApprovalStepApprover {
+  id         String   @id @default(uuid(7))
+  stepId     String   @map("step_id")
+  approverId String   @map("approver_id")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  step     ApprovalStep @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  approver User         @relation(fields: [approverId], references: [id], onDelete: Cascade)
+
+  @@unique([stepId, approverId])
+  @@map("approval_step_approvers")
+}
+
+/// An auditable decision (`docs/26` §1). **Insert-only**: no update or delete path exists
+/// in the application, and a database trigger rejects both (`docs/26` rule A3).
+model ApprovalDecision {
+  id             String                  @id @default(uuid(7))
+  organizationId String                  @map("organization_id")
+  workflowId     String                  @map("workflow_id")
+  stepId         String                  @map("step_id")
+  approverId     String                  @map("approver_id")
+  outcome        ApprovalDecisionOutcome
+  /// Required on REJECT (`docs/26` rule A4); the API enforces it. Optional on APPROVE.
+  comment        String?
+  decidedAt      DateTime                @default(now()) @map("decided_at") @db.Timestamptz(6)
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workflow     ApprovalWorkflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  step         ApprovalStep     @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  approver     User             @relation(fields: [approverId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, workflowId, decidedAt])
+  @@index([stepId, approverId])
+  @@map("approval_decisions")
+}

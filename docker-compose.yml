@@ -1,0 +1,89 @@
+# Local development stack.
+#
+#   docker compose up -d postgres redis mailpit     # infrastructure only
+#   docker compose up --build                       # everything
+#
+# Production topology (load balancer, multiple backends, pooler, replicas) is described
+# in the charter §5-§17 and docs/03, docs/33, docs/35. This file is for local parity:
+# a developer must be able to reproduce an issue with the same service set.
+
+name: servicehub
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: servicehub
+      POSTGRES_PASSWORD: servicehub
+      POSTGRES_DB: servicehub
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U servicehub -d servicehub"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Cache and async tier. Redis is both cache and broker (ADR-0003).
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Local mail catcher so notification flows can be exercised without a real provider
+  # (ADR-0006). Delivery is queued via the outbox, never sent inline — docs/29.
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # Web UI
+
+  backend:
+    build:
+      context: ./backend
+      target: development
+    environment:
+      NODE_ENV: development
+      PORT: 4000
+      DATABASE_URL: postgresql://servicehub:servicehub@postgres:5432/servicehub?schema=public
+      REDIS_URL: redis://redis:6379
+      CORS_ORIGIN: http://localhost:5173
+      LOG_LEVEL: debug
+      SMTP_URL: smtp://mailpit:1025
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/prisma:/app/prisma
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      target: development
+    environment:
+      VITE_API_BASE_URL: http://localhost:4000/api/v1
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend/src:/app/src
+    depends_on:
+      - backend
+
+volumes:
+  postgres-data:
+  redis-data:

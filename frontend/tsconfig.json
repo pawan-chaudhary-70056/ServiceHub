@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "useDefineForClassFields": true,
+
+    /* Strictness — docs/38 §2. */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    "allowImportingTsExtensions": false,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    // `node` is required by the build-time config files (vite.config.ts,
+    // playwright.config.ts). Client code must not use Node globals or builtins —
+    // `import.meta.env` is the only configuration surface — and ESLint enforces that.
+    "types": ["vite/client", "vitest/globals", "node"]
+  },
+  "include": ["src", "tests", "*.config.ts"]
+}
