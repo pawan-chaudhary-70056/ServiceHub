@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { deps, live, ready } from '../controllers/health.controller';
+import { deps, live, metrics, ready } from '../controllers/health.controller';
 
 /**
  * Probe routes.
@@ -15,3 +15,5 @@ export const healthRouter = Router();
 healthRouter.get('/live', live);
 healthRouter.get('/ready', ready);
 healthRouter.get('/deps', deps);
+// Prometheus text exposition (`docs/34` §4). Internal only, like the other probes.
+healthRouter.get('/metrics', metrics);

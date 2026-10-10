@@ -14,12 +14,14 @@ import {
   postResolve,
 } from '../controllers/incident.controller';
 import { getIncidentTasks, postIncidentTask } from '../controllers/task.controller';
+import { getIncidentKnowledgeLinks, postIncidentKnowledgeLink } from '../controllers/kb.controller';
 import { authenticate } from '../middlewares/authenticate';
 import { requireAnyPermission, requirePermission } from '../middlewares/authorize';
 import { INCIDENT_READ_PERMISSIONS } from '../helpers/authorization';
 import { csrfProtection } from '../middlewares/csrf';
 import { validate } from '../middlewares/validate';
 import { createTaskSchema } from '../validators/task.validators';
+import { knowledgeLinkSchema } from '../validators/kb.validators';
 import { cursorPaginationSchema, idParamsSchema } from '../validators';
 import {
   assignIncidentSchema,
@@ -131,4 +133,20 @@ incidentRouter.post(
   csrfProtection,
   validate({ params: idParamsSchema, body: createTaskSchema }),
   postIncidentTask,
+);
+
+// Linked knowledge articles (docs/27 §8, rule K6). The incident's own scope decides who
+// may see or add a link.
+incidentRouter.get(
+  '/:id/knowledge-links',
+  readAny,
+  validate({ params: idParamsSchema }),
+  getIncidentKnowledgeLinks,
+);
+incidentRouter.post(
+  '/:id/knowledge-links',
+  requirePermission('kb:article:read'),
+  csrfProtection,
+  validate({ params: idParamsSchema, body: knowledgeLinkSchema }),
+  postIncidentKnowledgeLink,
 );

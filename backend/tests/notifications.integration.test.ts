@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import request, { type Response, type Test } from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
@@ -418,5 +419,148 @@ describe('Notification outbox drain', () => {
       where: { eventType: 'notification.request.assigned', linkUrl: '/requests/req-inapp-2' },
     });
     expect(delivered?.status).toBe('SKIPPED');
+  });
+
+  dbIt('emails the assignee resolved from the payload user id (docs/29 §4)', async () => {
+    const adminUser = await prisma.user.findUniqueOrThrow({ where: { email: ADMIN_EMAIL } });
+    const queued = await prisma.outbox.create({
+      data: {
+        organizationId,
+        eventType: 'notification.request.assigned',
+        idempotencyKey: 'test-email-assignee',
+        payload: { requestId: 'req-email-1', assigneeId: adminUser.id },
+      },
+    });
+
+    const { adapter, messages } = capturingAdapter();
+    const first = await drainOutbox({ adapter, batchSize: 200 });
+    expect(first.delivered).toBeGreaterThanOrEqual(1);
+
+    const email = messages.find((message) => message.subject === 'A request was assigned to you');
+    expect(email).toBeDefined();
+    expect(email?.to).toBe(ADMIN_EMAIL);
+    // The email is actionable: it links straight to the record, not the app root.
+    expect(email?.text).toContain('/requests/req-email-1');
+    expect(email?.html).toContain('/requests/req-email-1');
+
+    // The row records the resolved user, the template version and the provider id (N9).
+    const notification = await prisma.notification.findUniqueOrThrow({
+      where: { dedupeKey: `notification.request.assigned:${queued.id}:${ADMIN_EMAIL}:EMAIL` },
+    });
+    expect(notification.status).toBe('SENT');
+    expect(notification.userId).toBe(adminUser.id);
+    expect(notification.templateVersion).toBe('v1');
+    expect(notification.providerMessageId).not.toBeNull();
+
+    // Redelivery reuses the terminal row instead of mailing again (docs/29 N4).
+    const before = messages.filter((m) => m.subject === 'A request was assigned to you').length;
+    await drainOutbox({ adapter, batchSize: 200 });
+    const after = messages.filter((m) => m.subject === 'A request was assigned to you').length;
+    expect(after).toBe(before);
+  });
+
+  dbIt('delivers one email per approver, exactly once (docs/29 §5)', async () => {
+    const adminUser = await prisma.user.findUniqueOrThrow({ where: { email: ADMIN_EMAIL } });
+    const operatorUser = await prisma.user.findUniqueOrThrow({ where: { email: OPERATOR_EMAIL } });
+    // A second approver inside the tenant is the ordinary case: a step has a list.
+    const secondApprover = await createUser({
+      email: 'approver@initech-notify.test',
+      displayName: 'Second Approver',
+      organizationId,
+      status: 'ACTIVE',
+    });
+
+    await prisma.outbox.create({
+      data: {
+        organizationId,
+        eventType: 'notification.approval.requested',
+        idempotencyKey: 'test-email-approvers',
+        payload: {
+          workflowId: 'wf-multi-1',
+          requestId: 'req-email-2',
+          stepOrder: 1,
+          // The platform operator is named by mistake: outside the tenant, so no mail.
+          approverIds: [adminUser.id, secondApprover.id, operatorUser.id],
+        },
+      },
+    });
+
+    const { adapter, messages } = capturingAdapter();
+    const first = await drainOutbox({ adapter, batchSize: 200 });
+    expect(first.delivered).toBeGreaterThanOrEqual(2);
+
+    const sent = messages.filter((m) => m.subject === 'An approval is waiting on you');
+    expect(sent.map((m) => m.to).sort()).toEqual(
+      [ADMIN_EMAIL, 'approver@initech-notify.test'].sort(),
+    );
+    expect(sent.every((m) => m.text.includes('/requests/req-email-2'))).toBe(true);
+
+    // Redelivery: both recipients are terminal, so neither is mailed a second time.
+    await drainOutbox({ adapter, batchSize: 200 });
+    expect(messages.filter((m) => m.subject === 'An approval is waiting on you')).toHaveLength(2);
+  });
+
+  dbIt('skips a recipient id that no longer resolves without blocking the queue', async () => {
+    const adminUser = await prisma.user.findUniqueOrThrow({ where: { email: ADMIN_EMAIL } });
+    const queued = await prisma.outbox.create({
+      data: {
+        organizationId,
+        eventType: 'notification.approval.requested',
+        idempotencyKey: 'test-email-orphan',
+        // One approver has left the tenant: their id resolves to nothing.
+        payload: {
+          workflowId: 'wf-multi-2',
+          requestId: 'req-email-3',
+          stepOrder: 1,
+          approverIds: [adminUser.id, randomUUID()],
+        },
+      },
+    });
+
+    const { adapter, messages } = capturingAdapter();
+    await drainOutbox({ adapter, batchSize: 200 });
+
+    const sent = messages.filter((m) => m.subject === 'An approval is waiting on you');
+    expect(sent.map((m) => m.to)).toEqual([ADMIN_EMAIL]);
+
+    // The event is released, not retried forever over the unresolvable id.
+    const row = await prisma.outbox.findUniqueOrThrow({ where: { id: queued.id } });
+    expect(row.processedAt).not.toBeNull();
+  });
+
+  dbIt('notifies the requester when the approval outcome is decided (docs/26 A7)', async () => {
+    const adminUser = await prisma.user.findUniqueOrThrow({ where: { email: ADMIN_EMAIL } });
+    await prisma.outbox.create({
+      data: {
+        organizationId,
+        eventType: 'notification.approval.approved',
+        idempotencyKey: 'test-email-outcome',
+        payload: {
+          workflowId: 'wf-outcome-1',
+          requestId: 'req-email-4',
+          reference: 'REQ-4004',
+          requesterId: adminUser.id,
+          outcome: 'APPROVED',
+        },
+      },
+    });
+
+    const { adapter, messages } = capturingAdapter();
+    await drainOutbox({ adapter, batchSize: 200 });
+
+    const email = messages.find((m) => m.subject === 'Your request was approved');
+    expect(email?.to).toBe(ADMIN_EMAIL);
+    expect(email?.text).toContain('Reference: REQ-4004');
+
+    // The requester also gets an in-app entry with a link back to the request.
+    const inApp = await prisma.notification.findFirst({
+      where: {
+        eventType: 'notification.approval.approved',
+        channel: 'IN_APP',
+        linkUrl: '/requests/req-email-4',
+      },
+    });
+    expect(inApp?.status).toBe('SENT');
+    expect(inApp?.userId).toBe(adminUser.id);
   });
 });

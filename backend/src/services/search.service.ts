@@ -16,6 +16,8 @@ import {
 } from '../models';
 import type { IncidentScope } from '../models/incident.model';
 import type { RequestScope } from '../models/request.model';
+import { resolveArticleScope } from './kb.service';
+import { resolveAssetScope } from './asset.service';
 
 /**
  * Unified search — docs/30 §2, F-13.
@@ -92,6 +94,10 @@ export function hrefFor(entityType: SearchEntityType, id: string): string | null
       return '/catalog';
     case 'USER':
       return '/users';
+    case 'ARTICLE':
+      return `/kb/${id}`;
+    case 'ASSET':
+      return `/assets/${id}`;
     default:
       return null;
   }
@@ -123,6 +129,22 @@ function resolveSources(
   const users = wanted.has('USER') && hasPermission(actor, 'user:manage');
   if (users) searchedTypes.push('USER');
 
+  // Knowledge articles are searchable by anyone entitled to read knowledge; the visibility
+  // class narrows which articles that is, as a SQL pre-filter (`docs/27` §10, rule K3).
+  const article =
+    wanted.has('ARTICLE') && hasPermission(actor, 'kb:article:read')
+      ? { scope: resolveArticleScope(actor), userId: actor.userId }
+      : null;
+  if (article) searchedTypes.push('ARTICLE');
+
+  // The asset register is searchable by a caller entitled to read assets; the holder scope
+  // narrows it in SQL, exactly as the register's own list does (`docs/28` §6, `docs/30` §2.3).
+  const asset =
+    wanted.has('ASSET') && hasAnyPermission(actor, ['asset:read.own', 'asset:read.any'])
+      ? { scope: resolveAssetScope(actor), userId: actor.userId }
+      : null;
+  if (asset) searchedTypes.push('ASSET');
+
   return {
     sources: {
       request,
@@ -130,6 +152,8 @@ function resolveSources(
       catalog,
       catalogIncludeUnavailable: hasPermission(actor, 'catalog:manage'),
       users,
+      article,
+      asset,
     },
     searchedTypes,
   };
@@ -149,7 +173,14 @@ function toResultItem(row: SearchRow): SearchResultItem {
   };
 }
 
-const ALL_TYPES: SearchEntityType[] = ['REQUEST', 'INCIDENT', 'CATALOG_ITEM', 'USER'];
+const ALL_TYPES: SearchEntityType[] = [
+  'REQUEST',
+  'INCIDENT',
+  'CATALOG_ITEM',
+  'USER',
+  'ARTICLE',
+  'ASSET',
+];
 
 /** Runs a unified, permission-scoped search (`docs/30` §2, §5). */
 export async function search(actor: Principal, input: SearchInput): Promise<SearchResult> {

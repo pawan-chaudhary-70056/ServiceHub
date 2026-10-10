@@ -5,6 +5,7 @@ import pinoHttp from 'pino-http';
 import { API_PREFIX, config, isTest } from './config';
 import { correlationId } from './middlewares/correlation';
 import { errorHandler } from './middlewares/error-handler';
+import { metricsMiddleware } from './middlewares/metrics';
 import { notFound } from './middlewares/not-found';
 import { createRateLimiter } from './middlewares/rate-limit';
 import { apiRouter, probeRouter } from './routes';
@@ -42,6 +43,11 @@ export function createApp(): Express {
 
   app.use(correlationId);
 
+  // Request metrics (docs/34 §4): registered before the routes and flushed on each
+  // response's `finish`, so the measurement spans the whole pipeline. The label is the
+  // matched route pattern, never the concrete URL (`34` §4.2).
+  app.use(metricsMiddleware);
+
   app.use(
     pinoHttp({
       logger,
@@ -60,7 +66,47 @@ export function createApp(): Express {
     }),
   );
 
-  app.use(helmet());
+  // Pinned, not defaulted (docs/17 §5): a default set is whatever the library's next
+  // release decides it is. Every directive the security architecture requires is stated
+  // here so a dependency bump cannot silently relax it — `default-src 'self'`, no
+  // `unsafe-inline` for scripts, no framing, HSTS for a year.
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        useDefaults: false,
+        directives: {
+          'default-src': ["'self'"],
+          'base-uri': ["'self'"],
+          'object-src': ["'none'"],
+          'frame-ancestors': ["'none'"],
+          'form-action': ["'self'"],
+          'script-src': ["'self'"],
+          // The API returns JSON, but a stylesheet or inline style in an error page is
+          // still an injection surface; styles are allowed, scripts never are.
+          'style-src': ["'self'", "'unsafe-inline'"],
+          'img-src': ["'self'", 'data:'],
+          'font-src': ["'self'"],
+          'connect-src': ["'self'"],
+          'upgrade-insecure-requests': [],
+        },
+      },
+      strictTransportSecurity: {
+        maxAge: 31_536_000,
+        includeSubDomains: true,
+        preload: false,
+      },
+      crossOriginOpenerPolicy: { policy: 'same-origin' },
+      crossOriginResourcePolicy: { policy: 'same-origin' },
+      // COEP would require CORP on every cross-origin fetch the browser makes; the API
+      // and the SPA are same-origin in production, so it buys nothing and breaks the
+      // dev origin pairing.
+      crossOriginEmbedderPolicy: false,
+      referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+      frameguard: { action: 'deny' },
+      noSniff: true,
+      xPermittedCrossDomainPolicies: { permittedPolicies: 'none' },
+    }),
+  );
 
   app.use(
     cors({
@@ -70,7 +116,17 @@ export function createApp(): Express {
     }),
   );
 
-  app.use(express.json({ limit: '1mb' }));
+  app.use(
+    express.json({
+      limit: '1mb',
+      // Keep the exact bytes a peer sent. A webhook signature is computed over the raw body,
+      // and re-serialising the parsed object can differ in key order and break verification
+      // (docs/32 §5). The buffer is bounded by `limit` and is never logged wholesale.
+      verify: (req, _res, buffer) => {
+        (req as { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
+      },
+    }),
+  );
   app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 
   // Probes are mounted before the limiter so they cannot be throttled into a false

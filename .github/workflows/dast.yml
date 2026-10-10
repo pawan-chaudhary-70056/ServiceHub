@@ -1,0 +1,64 @@
+# Dynamic analysis (DAST) — docs/20 §2 ("running application, authenticated and
+# unauthenticated", nightly on staging) and §3 (any High finding fails).
+#
+# This stage needs a *deployed* application, which is why it is its own nightly workflow
+# rather than part of the per-PR pipeline: there is nothing to scan until an environment
+# exists. The target comes from repository configuration, so pointing it at staging is a
+# setting rather than a code change.
+#
+# Authenticated coverage: the API is session-cookie based (`ADR-0001`), so an authorised
+# scan passes the session and CSRF cookies as ZAP replacer rules. Without a credential
+# the scan still exercises the unauthenticated surface (401/403 behaviour, headers, TLS).
+
+name: DAST
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Base URL to scan (defaults to the STAGING_BASE_URL repository variable)
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  zap-baseline:
+    name: OWASP ZAP baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve target
+        id: target
+        run: |
+          target="${{ github.event.inputs.target }}"
+          if [ -z "$target" ]; then
+            target="${{ vars.STAGING_BASE_URL }}"
+          fi
+          if [ -z "$target" ]; then
+            echo "::error::No DAST target: set the STAGING_BASE_URL repository variable or pass a target."
+            exit 1
+          fi
+          echo "url=$target" >> "$GITHUB_OUTPUT"
+
+      # `-I` fails the job on any High/Medium alert, which is the §3 gate; WARN-only
+      # alerts (Low/Informational) are reported without failing so the gate stays about
+      # exploitable findings rather than header trivia a scanner dislikes.
+      - name: ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: ${{ steps.target.outputs.url }}
+          rules_file_name: .zap/rules.tsv
+          cmd_options: '-I -a'
+          allow_issue_writing: true
+
+      - name: Upload scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-baseline-report
+          path: report_html.html

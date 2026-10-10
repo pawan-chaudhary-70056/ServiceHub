@@ -1,0 +1,30 @@
+# Prometheus scrape configuration (docs/34 §4, docs/35 §6).
+#
+# The application is scrape-based and stateless: each instance exposes its own registry at
+# `/api/v1/health/metrics` and the monitoring system aggregates. The endpoint is answered from
+# memory, so scraping adds no database load — which is why a short interval is affordable.
+#
+# The metric endpoint is internal-only by contract (`docs/34` §6): do not expose it through the
+# public ingress. In the local compose stack it is reachable on the service network.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    service: servicehub
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # The API and its in-process workers. A deployment replaces this static target with the
+  # orchestrator's service discovery (docs/35 §6); the metric path does not change.
+  - job_name: servicehub-backend
+    metrics_path: /api/v1/health/metrics
+    static_configs:
+      - targets: ['backend:4000']
+
+  # Prometheus scraping itself, so the rules can tell "the target is down" from "Prometheus is
+  # down" — the two produce the same silence otherwise.
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

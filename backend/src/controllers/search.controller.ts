@@ -66,14 +66,34 @@ export async function getReportExport(req: Request, res: Response): Promise<void
   res.status(200).json({ export: job });
 }
 
-/** `GET /reports/jobs/{id}/download` — the CSV, while the link is live (`docs/30` §5). */
+/**
+ * `GET /reports/jobs/{id}/download` — the CSV, while the link is live (`docs/30` §5).
+ *
+ * Two shapes, because the export lives in object storage (`ADR-0004`, `docs/19` §7.3): when the
+ * driver can issue a signed URL the API **redirects** to it and no bytes pass through the
+ * backend; otherwise (the local driver, development and tests) the API streams the file itself.
+ * Authorization and expiry are checked before either, so the redirect cannot be used to fetch
+ * an export the caller does not own.
+ */
 export async function getReportExportDownload(req: Request, res: Response): Promise<void> {
   if (!req.actor) {
     throw new UnauthenticatedError();
   }
   const { params } = validated<unknown, { id: string }>(res);
-  const { filename, content } = await downloadExport(req.actor, params.id);
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.status(200).send(content);
+  const target = await downloadExport(req.actor, params.id);
+
+  if (target.kind === 'redirect') {
+    // The signed URL expires on its own; `Cache-Control` keeps a proxy from holding a copy
+    // of a link that is about to become worthless.
+    res.setHeader('Cache-Control', 'no-store');
+    res.redirect(302, target.url);
+    return;
+  }
+
+  res.setHeader('Content-Type', target.contentType);
+  res.setHeader('Content-Disposition', target.disposition);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.status(200);
+  target.stream.pipe(res);
 }

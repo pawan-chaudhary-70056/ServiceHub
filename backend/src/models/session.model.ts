@@ -75,6 +75,27 @@ export async function listLiveSessionTokenHashes(
 }
 
 /**
+ * A user's live sessions, newest activity first — the session self-service list
+ * (`docs/06 §7`). Revoked and absolutely-expired rows are excluded in the query, so the
+ * list cannot offer to revoke something that is already dead.
+ */
+export function listSessionsForUser(
+  userId: string,
+  client: DataClient = prisma,
+): Promise<Session[]> {
+  return client.session.findMany({
+    where: { userId, revokedAt: null, absoluteExpiresAt: { gt: new Date() } },
+    orderBy: [{ lastSeenAt: 'desc' }, { id: 'desc' }],
+    take: 50,
+  });
+}
+
+/** Loads a session by id, for the ownership check before a self-service revocation. */
+export function findSessionById(id: string, client: DataClient = prisma): Promise<Session | null> {
+  return client.session.findUnique({ where: { id } });
+}
+
+/**
  * Revokes every live session for a user.
  *
  * Used on password change/reset and deactivation, where docs/06 §7 requires existing

@@ -71,6 +71,23 @@ services:
       redis:
         condition: service_healthy
 
+  # Metrics, alert rules and the Service-overview dashboard (docs/34). Started explicitly
+  # (`docker compose up -d prometheus`) because it is not needed to run the app, and a local
+  # stack should not pay for a scraper it is not reading.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=7d'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - backend
+
   frontend:
     build:
       context: ./frontend
@@ -87,3 +104,4 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  prometheus-data:

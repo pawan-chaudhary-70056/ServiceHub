@@ -44,6 +44,30 @@ describe('GET /api/v1/health/ready', () => {
   });
 });
 
+describe('security headers (docs/17 §5)', () => {
+  it('sends the pinned set on every response, not library defaults', async () => {
+    const response = await request(app).get(`${BASE}/health/live`);
+
+    const csp = response.headers['content-security-policy'] ?? '';
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("object-src 'none'");
+    expect(csp).toContain("frame-ancestors 'none'");
+    // No unsafe-inline for scripts — the directive docs/17 §5 calls out explicitly.
+    expect(csp).not.toContain("script-src 'self' 'unsafe-inline'");
+    expect(csp).not.toContain('unsafe-eval');
+
+    expect(response.headers['strict-transport-security']).toContain('max-age=31536000');
+    expect(response.headers['strict-transport-security']).toContain('includeSubDomains');
+    expect(response.headers['x-content-type-options']).toBe('nosniff');
+    expect(response.headers['x-frame-options']).toBe('DENY');
+    expect(response.headers['referrer-policy']).toBe('strict-origin-when-cross-origin');
+    expect(response.headers['cross-origin-opener-policy']).toBe('same-origin');
+    expect(response.headers['cross-origin-resource-policy']).toBe('same-origin');
+    // The framework must not advertise itself (docs/17).
+    expect(response.headers['x-powered-by']).toBeUndefined();
+  });
+});
+
 describe('error contract', () => {
   it('returns a NOT_FOUND problem for an unmatched route', async () => {
     const response = await request(app).get(`${BASE}/does-not-exist`);

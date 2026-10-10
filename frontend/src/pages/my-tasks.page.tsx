@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { listMyTasks, type TaskStatus, type TaskView } from '../api/tasks.api';
+import { RecordHistoryDisclosure } from '../components/record-history-panel';
 import { StatusBadge } from '../components/status-badge';
 import type { Tone } from '../themes/tokens';
 
@@ -120,6 +121,16 @@ export function MyTasksPage() {
                     <StatusBadge tone={STATUS_TONE[task.status]}>{task.status}</StatusBadge>
                   </span>
                 </Link>
+                {/* The task's own audit trail (docs/31 §11), authorised through its parent.
+                    Mounted lazily so a long list fires no history requests until opened. */}
+                <div className="px-4 pb-3">
+                  <RecordHistoryDisclosure
+                    entityType="Task"
+                    entityId={task.id}
+                    label="Task history"
+                    heading="Task history"
+                  />
+                </div>
               </li>
             ))}
           </ul>

@@ -7,7 +7,14 @@ import { z } from 'zod';
  * closed enum, so a client cannot ask for a source the server does not scope.
  */
 
-export const searchEntityTypeSchema = z.enum(['REQUEST', 'INCIDENT', 'CATALOG_ITEM', 'USER']);
+export const searchEntityTypeSchema = z.enum([
+  'REQUEST',
+  'INCIDENT',
+  'CATALOG_ITEM',
+  'USER',
+  'ARTICLE',
+  'ASSET',
+]);
 
 export const searchQuerySchema = z
   .object({
@@ -21,7 +28,7 @@ export const searchQuerySchema = z
           .map((entry) => entry.trim().toUpperCase())
           .filter((entry) => entry.length > 0),
       )
-      .pipe(z.array(searchEntityTypeSchema).max(4))
+      .pipe(z.array(searchEntityTypeSchema).max(6))
       .optional(),
     limit: z.coerce.number().int().positive().max(50).optional(),
     cursor: z.string().max(512).optional(),

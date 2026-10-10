@@ -10,6 +10,7 @@ import {
   postTransition,
 } from '../controllers/request.controller';
 import { getApprovalsForRequest } from '../controllers/approval.controller';
+import { getRequestKnowledgeLinks, postRequestKnowledgeLink } from '../controllers/kb.controller';
 import { getRequestTasks, postRequestTask } from '../controllers/task.controller';
 import { authenticate } from '../middlewares/authenticate';
 import { requireAnyPermission, requirePermission } from '../middlewares/authorize';
@@ -17,6 +18,7 @@ import { REQUEST_READ_PERMISSIONS } from '../helpers/authorization';
 import { csrfProtection } from '../middlewares/csrf';
 import { validate } from '../middlewares/validate';
 import { createTaskSchema } from '../validators/task.validators';
+import { knowledgeLinkSchema } from '../validators/kb.validators';
 import { cursorPaginationSchema, idParamsSchema } from '../validators';
 import {
   assignRequestSchema,
@@ -108,4 +110,20 @@ requestRouter.post(
   csrfProtection,
   validate({ params: idParamsSchema, body: createTaskSchema }),
   postRequestTask,
+);
+
+// Linked knowledge articles (docs/27 §8, rule K6). Reading inherits the request's own
+// visibility; a link records the article version applied at the time.
+requestRouter.get(
+  '/:id/knowledge-links',
+  readAny,
+  validate({ params: idParamsSchema }),
+  getRequestKnowledgeLinks,
+);
+requestRouter.post(
+  '/:id/knowledge-links',
+  requirePermission('kb:article:read'),
+  csrfProtection,
+  validate({ params: idParamsSchema, body: knowledgeLinkSchema }),
+  postRequestKnowledgeLink,
 );

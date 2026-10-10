@@ -88,6 +88,24 @@ jobs:
       - name: Dependency audit
         run: npm audit --audit-level=high
 
+  iac-scan:
+    name: IaC and container scan
+    runs-on: ubuntu-latest
+    # docs/20 §2: image and configuration misconfiguration, on every build. Trivy reads
+    # the Dockerfiles and compose file as written, so a relaxed flag or a root runtime is
+    # caught here rather than in production.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan IaC configuration
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          format: table
+
   secret-scan:
     name: Secret scan
     runs-on: ubuntu-latest
@@ -96,10 +114,30 @@ jobs:
         with:
           fetch-depth: 0
       # Backstop only. The control is that secrets are never committed.
-      - name: Scan for committed credentials
+      #
+      # Two passes, because one pattern cannot serve both jobs. Pass 1 matches a
+      # secret-shaped name assigned any 16-character value, and runs over source and
+      # configuration — every test file is excluded, because `const ADMIN_PASSWORD =
+      # 'Secur3-Passphrase!'` is a fixture and not a credential: it was failing this job on
+      # 13 files, and a gate that cries wolf is a gate people learn to skip (docs/20 §3).
+      # Pass 2 covers everything, tests included, but only for values with a real provider's
+      # shape — so a live key accidentally pasted into a fixture is still caught.
+      - name: Scan for committed credentials (source and configuration)
         run: |
           if git grep -nEI '(SECRET|PASSWORD|TOKEN|API_KEY)[[:space:]]*[:=][[:space:]]*["'\'']?[A-Za-z0-9/_+-]{16,}' \
-             -- ':!*.example' ':!*.md' ':!docs/*' ':!package-lock.json'; then
+             -- ':!*.example' ':!*.md' ':!docs/*' ':!package-lock.json' \
+                ':!**/tests/**' ':!**/*.test.ts' ':!**/*.test.tsx'; then
             echo "::error::Possible committed secret detected."
+            exit 1
+          fi
+
+      # Credential shapes, not just credential-shaped names: a private key block, an AWS
+      # access key id, a Stripe/SendGrid/webhook signing secret. Applied to every file,
+      # so no directory is a blind spot.
+      - name: Scan for provider credential shapes (all files)
+        run: |
+          if git grep -nEI '(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(sk|pk)_(live|test)_[A-Za-z0-9]{20,}|whsec_[A-Za-z0-9]{20,}|SG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,})' \
+             -- ':!*.example' ':!*.md' ':!docs/*' ':!package-lock.json'; then
+            echo "::error::A provider credential shape was committed."
             exit 1
           fi

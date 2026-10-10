@@ -1,4 +1,8 @@
 import { PrismaClient } from '@prisma/client';
+// Load a local `backend/.env` (when present) so `npm run prisma:seed` works the way
+// `npx prisma migrate` does, without every variable being exported by hand. A deployed
+// environment has no `.env` and an injected environment always wins (`config/load-env.ts`).
+import '../src/config/load-env';
 import { PERMISSIONS, PLATFORM_ROLES } from '../src/helpers/permission-catalogue';
 
 /**

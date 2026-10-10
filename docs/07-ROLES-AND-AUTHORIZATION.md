@@ -37,6 +37,7 @@ incident:create         incident:read.any       incident:update.any
 sla:policy:manage       sla:clock:override      approval:decide
 kb:article:publish      asset:assign            user:role:manage
 audit:read              report:read             admin:config
+integration:manage      integration:read        integration:retry
 platform:organization:manage                     platform:operator:manage
 ```
 
@@ -96,7 +97,11 @@ Legend: **A** = all/any · **T** = within team/scope · **O** = own only · **�
 | Asset assign | — | — | — | — | — | A | A | — |
 | Notification preferences | O | O | O | O | O | O | A | — |
 | Report read | — | T | T | — | — | T | A | A |
-| Audit read | — | — | — | — | — | — | A | A |
+| Audit read | — | — | T | — | — | — | A | A |
+| Audit export | — | — | T | — | — | — | A | A |
+| Integration read | — | — | — | — | — | — | A | — |
+| Integration manage | — | — | — | — | — | — | A | — |
+| Integration retry | — | — | — | — | — | — | A | — |
 | User manage | — | — | — | — | — | — | A | — |
 | Role manage | — | — | — | — | — | — | A | — |
 | System config | — | — | — | — | — | — | A | — |

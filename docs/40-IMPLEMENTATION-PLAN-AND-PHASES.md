@@ -128,7 +128,7 @@ Each milestone is expressed as **demonstrable capabilities**, never as dates:
 | M1 Contracts frozen | Docs `03`–`19` approved; decisions closed |
 | M2 Walk-through | A request flows raise → approve → resolve → notify with an audit trail |
 | M3 Core complete | Four E2E journeys pass; SLA examples pass; security tests pass |
-| M4 Extended complete | KB, assets, integrations, reporting live |
+| M4 Extended complete | KB, assets, attachments, integrations, reporting live — KB, assets and reporting are live (`43` increments 14/16); **file attachments** (`19`, F-16 — the one feature in `05` with no code) are live (`43` increment 23); integrations (`32`, `Approved` 2026-10-08) are **partially** live: outbound webhooks (`43` increment 18), inbound webhooks (`43` increment 19), the admin UI and health board (`43` increments 20/21) inbound roster sync (`43` increment 22), the reliability patterns (circuit breaker, bulkhead) and the `admin:config` configuration surface (`43` increment 26) are implemented; the asynchronous antivirus hook behind the upload scan step (`19` §7.2), the N8 provider webhooks, per-identity rate-limit keying and the separate worker process remain |
 | M5 Production ready | Security review, load targets, DR rehearsal, a11y audit passed |
 
 Traceability: each capability maps to a functional requirement (`02`), a contract
@@ -180,12 +180,92 @@ is named. A missed gate is recorded too, not ignored (§4).
 | **0 Foundation** | 2026-10-01 | — (Phase 0 blocks no decision) | `01`, `02`, `41` approved; `D`-list owned (`00` §7) | none — no implementation exists |
 | **1 Design** | 2026-10-01 | `D-1`–`D-5` closed by `ADR-0001`–`ADR-0005` (`42` §3) | every document in `03`–`19`, `38` is `Approved`; requirement→contract references resolve (`42` §5) | none — no implementation exists to contradict a contract |
 | **2 Core build — entry** | 2026-10-01 | `D-6`–`D-8` closed by `ADR-0006`–`ADR-0008` (plus `D-1`–`D-5` from Gate 1) | core documents `20`, `21`, `22`–`26`, `29`–`31`, `33`–`37` are `Approved` | none — no implementation exists yet |
+| **3 Extended — entry** | 2026-10-08 | no blocking decision — `32` (Integrations) reached `Approved` on 2026-10-08 on owner authority | the extended-feature documents `27`, `28` and `32` are all `Approved`; `27`/`28` are implemented and tested (`43` increment 16) and the first `32` slice is live (`43` increment 18) | drift audit performed for `27`/`28`/`32`: `07`, `09`, `11`, `30` and `43` reconciled |
 
 **Phase 2 (Core Build) entry gate is now met** (2026-10-01): the core documents are
 `Approved` and all eight decisions are closed. Construction may begin.
 
 **Gate 2 is *not* passed, and the log above records only the entry.** Gate 2 passes at the
 phase's **exit milestone**, when the four E2E journeys (`37` §7), the security tests
-(`20`) and the SLA worked examples (`25` §4) are demonstrated on the built system. No
-implementation exists, so those criteria cannot be demonstrated and the gate is not
-claimed.
+(`20`) and the SLA worked examples (`25` §4) are demonstrated on the built system. Those
+automated criteria are now demonstrated (`43` increments 15 and 16); the remaining
+outstanding items are the human and external layers — SAST/dependency/secrets/IaC scans,
+DAST and a penetration test — so the gate is still not claimed.
+
+**The scan stages now exist as pipelines, and that is not the same as evidence.** As of
+`43` increment 24, CodeQL SAST (every PR), a Trivy IaC/container scan (every build) and a
+nightly OWASP ZAP baseline DAST workflow are wired (`20` §2/§3), alongside the existing
+dependency and secret scans. **None has yet run against a deployed environment, and no
+penetration test has been commissioned**, so the gate criterion stays unproven until a
+pipeline run and a pentest report exist to cite. Rolling out the DAST target
+(`STAGING_BASE_URL`) and recording the first clean runs is the next step, not a
+formality.
+
+**One criterion moved from unproven to proven, and it had to be repaired first.** The
+secrets scan was failing on its own test fixtures — 13 tracked files matched the pattern —
+so the job was red on every push and proved nothing. The two-pass fix (the `Fix` entry at
+the head of `43` §3) leaves it passing on the current tree, verified with the same
+`git grep` command CI runs and over the working tree rather than only tracked files. That
+is the evidence for the secrets-scan row of `20` §3; SAST, IaC, DAST and the penetration
+test remain unproven.
+
+**Increment 25 narrowed M4's remaining gap without closing it.** Notification depth now
+covers the recipient-bearing domain events — ten templates, address resolution at send time
+from payload user ids, and a multi-recipient path that keeps the exactly-once dedupe keys
+(`29` §5; `43` increment 25) — and team administration is reachable from a UI (`07` §6), so
+the membership write surface added in increment 24 is no longer API-only. Reporting gained
+the `tasks.workload` and `notifications.delivery` metrics (`30` §3.3). What is **not**
+closed: the time-based metrics, cached aggregates, the N8 provider webhooks, per-identity
+rate-limit keying, the separate worker process, the observability stack (`34`) and every
+Phase 4 hardening criterion. M4's `reporting` and `integrations` lines therefore stay in the
+partial column, and the next increment on this path is the integrations leftovers —
+circuit-breaker/bulkhead tuning and credential/configuration administration.
+
+**Phase 3 (Extended) entry gate is now met** (2026-10-08): the extended-feature documents
+`27` (Knowledge Base), `28` (Asset Management) and `32` (Integrations) are all `Approved`,
+so under `00` R5 each may be built against its own document. `27` and `28` were implemented
+in increment 16 and the first `32` slice in increment 18.
+
+**M4 is not yet complete, and the log records that honestly.** M4 requires KB, assets,
+integrations and reporting to be *live*; attachments, security headers, session
+self-service, team administration and metrics landed in `43` increments 23/24, and
+integrations are still only **partially** live — the
+outbound-webhook slice (adapter boundary, signed delivery, retry and dead-letter), the
+inbound-webhook receive path (`32` §5: verify, persist, ack, process, dead-letter), the admin
+UI (`§13`), the health board (`§12`) and the scheduled roster sync (`§6`) exist, but
+circuit-breaker/bulkhead tuning and credential/configuration administration remain. Phase 3 continues; M4 passes when those land and the
+phase's exit evidence (a demonstrated capability per feature, per `40` §10 point 4) is
+recorded. `32` §15 AC2 — inbound webhooks reject unsigned, stale, or duplicate events — is
+now demonstrated by `43` increment 19.
+
+**Increment 26 closed the two named integration blockers without closing M4.** The `32` §8
+circuit breaker and bulkhead now exist (`integrations/resilience.ts`), are applied to every
+outbound webhook delivery and to the email provider, and are surfaced as metrics (`34` §4);
+the `admin:config` configuration surface (`32` §11/§12/§13) serves a per-tenant integration
+catalogue with reliability tuning, an enabled flag, a connectivity test and a **credential
+reference that cannot hold a secret** (`17` §3). So "circuit-breaker/bulkhead tuning" and
+"credential/configuration administration" are **delivered**, and M4's `integrations` line is
+now partial only for the asynchronous antivirus hook and the N8 provider webhooks. What still
+keeps M4 open: the time-based report metrics and cached aggregates (`reporting`), the
+object-storage decision for exports, per-identity rate-limit keying, the separate worker
+process, the observability stack (`34`) and every Phase 4 hardening criterion. Increment 26
+also repaired a real defect the resilience layer exposed in the test harness: the breaker
+registry is process-global, so a test that drove a provider to failure left an open circuit
+for the tests after it; `tests/setup.ts` now clears it between tests.
+
+**Increments 27–29 closed three more long-carried items, and M4's remaining list is now
+short.** Increment 27 made every worker's liveness observable (`recordJobRun` from all six
+schedulers, not just the SLA sweep) and added the alerting and dashboard layer
+(`ops/observability`, plus a drift guard that every metric named in a rule is one the registry
+emits). Increment 28 gave the schedulers their own process tier (`PROCESS_ROLE=worker`,
+`src/worker.ts`, a Dockerfile `worker` stage), which is the "separate worker process / queue
+consumer" item open since increment 3 — and a worker that is refused, not started, when asked
+to serve HTTP (`03` §3). Increment 29 migrated report and audit exports to **object storage**
+(`ADR-0004`, `19` §7.1/§7.3) and dropped `report_exports.content`, which **supersedes
+`CR-0003`** and resolves the last "object-storage adapter for report exports" line. What
+remains for M4: the time-based report metrics and cached aggregates, the N8 provider webhooks,
+per-identity rate-limit keying, the asynchronous antivirus hook, and the whole of Phase 4
+(SAST/DAST/pentest runs against a deployed environment, load validation against `02` D-7, DR
+rehearsal, accessibility audit, browser E2E journeys). M4's `reporting` line stays partial on
+the first two of those; its `integrations` line is partial only for the N8 provider webhooks
+and the antivirus hook.

@@ -1,0 +1,9 @@
+Contact: mailto:security@servicehub.example
+Expires: 2030-10-09T00:00:00.000Z
+Preferred-Languages: en
+Policy: https://servicehub.example/SECURITY.md
+Canonical: https://servicehub.example/.well-known/security.txt
+
+Do not open a public issue for a security problem. Report privately with the affected
+component, the impact, reproduction steps and any suggested remediation; see the policy
+link above for the full disclosure process.

@@ -2,6 +2,8 @@ import { Prisma } from '@prisma/client';
 import { prisma } from './db';
 import type { RequestScope } from './request.model';
 import type { IncidentScope } from './incident.model';
+import type { ArticleVisibilityScope } from './kb.model';
+import type { AssetScope } from './asset.model';
 
 /**
  * Search data access — docs/30 §2, F-13.
@@ -20,7 +22,8 @@ import type { IncidentScope } from './incident.model';
  * Only `services/` may import this module (docs/03 §4).
  */
 
-export type SearchEntityType = 'REQUEST' | 'INCIDENT' | 'CATALOG_ITEM' | 'USER';
+export type SearchEntityType =
+  'REQUEST' | 'INCIDENT' | 'CATALOG_ITEM' | 'USER' | 'ARTICLE' | 'ASSET';
 
 export interface SearchRow {
   entity_type: string;
@@ -41,6 +44,16 @@ export interface SearchSources {
   /** Whether an unmanaged caller is restricted to ACTIVE catalog items (`docs/21` §4). */
   catalogIncludeUnavailable: boolean;
   users: boolean;
+  /**
+   * Knowledge articles, with the caller's widest visibility class (`docs/27` §10).
+   * `PUBLISHED` only, and visibility is a pre-filter — never rank, then hide.
+   */
+  article: { scope: ArticleVisibilityScope; userId: string } | null;
+  /**
+   * The asset register (`docs/30` §2.1), scoped to the holder unless the caller holds
+   * `asset:read.any` (`docs/28` §6).
+   */
+  asset: { scope: AssetScope; userId: string } | null;
 }
 
 export interface SearchQueryParams {
@@ -59,6 +72,10 @@ const REQUEST_VECTOR = Prisma.sql`to_tsvector('english', coalesce(r."reference",
 const INCIDENT_VECTOR = Prisma.sql`to_tsvector('english', coalesce(i."reference", '') || ' ' || coalesce(i."title", '') || ' ' || coalesce(i."description", '') || ' ' || coalesce(i."resolution_summary", ''))`;
 const CATALOG_VECTOR = Prisma.sql`to_tsvector('english', coalesce(c."name", '') || ' ' || coalesce(c."description", ''))`;
 const USER_VECTOR = Prisma.sql`to_tsvector('english', coalesce(u."display_name", '') || ' ' || coalesce(u."email", ''))`;
+// Must match `articles_search_idx` exactly, including the `setweight` classes (docs/09 §4).
+const ARTICLE_VECTOR = Prisma.sql`(setweight(to_tsvector('english', coalesce(a."title", '') || ' ' || coalesce(a."summary", '')), 'A') || setweight(to_tsvector('english', coalesce(a."body", '')), 'B'))`;
+// Must match `assets_search_idx` exactly (docs/09 §4).
+const ASSET_VECTOR = Prisma.sql`to_tsvector('english', coalesce(s."tag", '') || ' ' || coalesce(s."serial_number", '') || ' ' || coalesce(s."name", ''))`;
 
 /** `IN` list for team ids, or an always-false clause when the caller has no teams. */
 function teamIn(column: Prisma.Sql, teamIds: string[]): Prisma.Sql {
@@ -165,6 +182,68 @@ function userBranch(p: SearchQueryParams, mode: 'fts' | 'browse'): Prisma.Sql {
 }
 
 /**
+ * Knowledge articles (`docs/27` §10, `docs/30` §2.2).
+ *
+ * Two predicates are non-negotiable and both are SQL, applied before ranking (rule K3):
+ *   - only `PUBLISHED` articles are searchable — a draft or an archived article is not
+ *     merely hidden from the result list, it is not selected;
+ *   - visibility is the caller's, using the **same** rule as the read path.
+ */
+function articleBranch(p: SearchQueryParams, mode: 'fts' | 'browse'): Prisma.Sql {
+  const article = p.sources.article;
+  if (!article) return Prisma.empty;
+
+  const body = Prisma.sql`coalesce(a."title", '') || ' ' || coalesce(a."summary", '') || ' ' || coalesce(a."body", '')`;
+  const scopeSql =
+    article.scope === 'ALL'
+      ? Prisma.empty
+      : article.scope === 'INTERNAL'
+        ? Prisma.sql`AND (a."visibility"::text IN ('PUBLIC', 'INTERNAL') OR (a."visibility"::text = 'RESTRICTED' AND (a."author_id" = ${article.userId} OR a."reviewer_id" = ${article.userId})))`
+        : Prisma.sql`AND a."visibility"::text = 'PUBLIC'`;
+
+  return Prisma.sql`
+    SELECT 'ARTICLE' AS entity_type, a."id" AS id, NULL::text AS reference,
+           a."title" AS title, a."summary" AS subtitle, a."status"::text AS status,
+           a."updated_at" AS updated_at, ${body} AS body_text,
+           ${rankExpr(mode, ARTICLE_VECTOR, null, p.query)} AS rank
+    FROM articles a, q
+    WHERE a."organization_id" = ${p.organizationId}
+      AND a."status"::text = 'PUBLISHED'
+      ${textPredicate(mode, ARTICLE_VECTOR, null, p.query)}
+      ${scopeSql}
+  `;
+}
+
+/**
+ * The asset register (`docs/30` §2.1, `docs/28` §6).
+ *
+ * The holder scope is a SQL predicate, so a holder searching finds their own assets and
+ * not the rest of the register — the same rule as the register's own list, expressed in
+ * the same place as the ranking (S1).
+ */
+function assetBranch(p: SearchQueryParams, mode: 'fts' | 'browse'): Prisma.Sql {
+  const asset = p.sources.asset;
+  if (!asset) return Prisma.empty;
+
+  const body = Prisma.sql`coalesce(s."tag", '') || ' ' || coalesce(s."serial_number", '') || ' ' || coalesce(s."name", '')`;
+  const scopeSql =
+    asset.scope === 'ANY'
+      ? Prisma.empty
+      : Prisma.sql`AND s."assigned_to_user_id" = ${asset.userId}`;
+
+  return Prisma.sql`
+    SELECT 'ASSET' AS entity_type, s."id" AS id, s."tag" AS reference,
+           s."name" AS title, s."serial_number" AS subtitle, s."state"::text AS status,
+           s."updated_at" AS updated_at, ${body} AS body_text,
+           ${rankExpr(mode, ASSET_VECTOR, Prisma.sql`s."tag"`, p.query)} AS rank
+    FROM assets s, q
+    WHERE s."organization_id" = ${p.organizationId}
+      ${textPredicate(mode, ASSET_VECTOR, Prisma.sql`s."tag"`, p.query)}
+      ${scopeSql}
+  `;
+}
+
+/**
  * Runs the unified, permission-scoped search as a single statement (`docs/30` §2.3 S2).
  *
  * A query shorter than two characters has no full-text terms (`§2.4`), so only an exact
@@ -181,6 +260,8 @@ export async function searchRows(p: SearchQueryParams): Promise<SearchRow[]> {
   if (p.sources.incident !== null) branches.push(incidentBranch(p, mode));
   if (p.sources.catalog && mode !== 'exact') branches.push(catalogBranch(p, mode));
   if (p.sources.users && mode !== 'exact') branches.push(userBranch(p, mode));
+  if (p.sources.article && mode !== 'exact') branches.push(articleBranch(p, mode));
+  if (p.sources.asset && mode !== 'exact') branches.push(assetBranch(p, mode));
 
   if (branches.length === 0) return [];
 

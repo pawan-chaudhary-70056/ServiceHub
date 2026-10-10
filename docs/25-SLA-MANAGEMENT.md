@@ -94,7 +94,7 @@ overnight for a business-hours desk, so it is opt-in per policy rather than the 
 | # | Scenario | Result |
 |---|---|---|
 | 1 | Target 8 working hours. Request created Fri 16:00. | Target reached Mon 16:00. The weekend contributes zero elapsed time. |
-| 2 | Target 8 working hours. Created Mon 10:00, enters `APPROVAL_PENDING` Mon 12:00, resumes Wed 09:00. | 2 hours elapsed before pause; resumes Wed; target reached Thu 15:00. Approval time is excluded. |
+| 2 | Target 8 working hours. Created Mon 10:00, enters `APPROVAL_PENDING` Mon 12:00, resumes Wed 09:00. | 2 hours elapsed before pause; resumes Wed with 6 hours left; target reached **Wed 15:00**. Approval time is excluded, and the closed hours inside the pause are not counted a second time. |
 | 3 | A public holiday falls on a working Tuesday. | Tuesday contributes zero; the target shifts one working day later. |
 | 4 | DST spring-forward occurs during the window. | The working day remains 09:00–17:00 local; the actual duration is 7 hours. Calendar arithmetic handles it correctly; naive offset math would not. |
 | 5 | A holiday is added retroactively for last month. | The target instants already computed are **not** recalculated; the record keeps its original `targetAt`. Retroactive calendar edits are recorded and do not rewrite history. |

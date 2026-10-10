@@ -9,7 +9,12 @@ import {
 import type { Principal } from '../helpers/authorization';
 import { isSessionExpired, newSessionWindow, refreshedIdleExpiry } from '../helpers/session';
 import { validatePasswordPolicy } from '../helpers/password';
-import { AccountLockedError, UnauthenticatedError, ValidationError } from '../utils/errors';
+import {
+  AccountLockedError,
+  NotFoundError,
+  UnauthenticatedError,
+  ValidationError,
+} from '../utils/errors';
 import { normalizeEmail, type TxClient } from '../models';
 import {
   clearFailedAttempts,
@@ -18,11 +23,13 @@ import {
   createSession,
   findCredentialByUserId,
   findPasswordResetByTokenHash,
+  findSessionById,
   findSessionByTokenHash,
   findUserByEmail,
   findUserById,
   invalidateOutstandingResets,
   listLiveSessionTokenHashes,
+  listSessionsForUser,
   markPasswordResetUsed,
   recordFailedAttempt,
   resolvePermissionKeys,
@@ -283,6 +290,97 @@ export async function logout(
   });
 
   // Invalidate the shared cache after the durable revocation commits (docs/33 C3).
+  if (revokedTokenHash) {
+    await invalidateSessionCache(revokedTokenHash);
+  }
+}
+
+/**
+ * One of the caller's own sessions, as the self-service list shows it (`docs/06 §7`).
+ *
+ * The token digest, the CSRF digest and the session id are deliberately absent: the
+ * identity of a session is enough to revoke it, and nothing here should become a
+ * credential if it is logged or shown on a shared screen (docs/19 §1).
+ */
+export interface SessionView {
+  id: string;
+  createdAt: string;
+  lastSeenAt: string;
+  idleExpiresAt: string;
+  absoluteExpiresAt: string;
+  sourceIp: string | null;
+  userAgent: string | null;
+  /** True for the session making this request, so the UI can label it "this device". */
+  current: boolean;
+}
+
+/**
+ * The caller's live sessions.
+ *
+ * Keyed on the authenticated user id — there is no parameter to tamper with, so this
+ * endpoint cannot enumerate anyone else's sessions (docs/07 §1).
+ */
+export async function listOwnSessions(
+  actor: Principal,
+  currentSessionId: string,
+): Promise<SessionView[]> {
+  const sessions = await listSessionsForUser(actor.userId);
+  return sessions.map((session) => ({
+    id: session.id,
+    createdAt: session.createdAt.toISOString(),
+    lastSeenAt: session.lastSeenAt.toISOString(),
+    idleExpiresAt: session.idleExpiresAt.toISOString(),
+    absoluteExpiresAt: session.absoluteExpiresAt.toISOString(),
+    sourceIp: session.sourceIp,
+    userAgent: session.userAgent,
+    current: session.id === currentSessionId,
+  }));
+}
+
+/**
+ * Revokes one of the caller's own sessions (docs/06 §7).
+ *
+ * Revocation is immediate and durable: the row is updated, the audit record is written in
+ * the same transaction, and the shared cache entry is dropped afterwards so the next
+ * request cannot be served from a stale cache (docs/33 C3). A session that belongs to
+ * someone else is `404`, not `403` — the caller may not learn that the id exists
+ * (docs/17 §5).
+ */
+export async function revokeOwnSession(
+  sessionId: string,
+  actor: Principal,
+  meta: RequestMeta,
+): Promise<void> {
+  const session = await findSessionById(sessionId);
+  if (!session || session.userId !== actor.userId) {
+    throw new NotFoundError('Session not found.');
+  }
+  if (session.revokedAt) {
+    return; // Already revoked: the outcome the caller asked for has already happened.
+  }
+
+  let revokedTokenHash: string | null = null;
+
+  await runInTransaction(async (tx) => {
+    const revoked = await revokeSession(sessionId, tx);
+    revokedTokenHash = revoked.tokenHash;
+    await writeAudit(
+      {
+        organizationId: actor.organizationId,
+        actorId: actor.userId,
+        actorType: 'USER',
+        action: AUDIT_ACTION.SESSION_REVOKE,
+        entityType: AUDIT_ENTITY.SESSION,
+        entityId: sessionId,
+        after: { userAgent: session.userAgent, sourceIp: session.sourceIp },
+        correlationId: meta.correlationId,
+        sourceIp: meta.sourceIp ?? null,
+        userAgent: meta.userAgent ?? null,
+      },
+      tx,
+    );
+  });
+
   if (revokedTokenHash) {
     await invalidateSessionCache(revokedTokenHash);
   }

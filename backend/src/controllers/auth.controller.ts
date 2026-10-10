@@ -2,10 +2,12 @@ import type { Request, Response } from 'express';
 import {
   acceptInvitation,
   getIdentity,
+  listOwnSessions,
   login,
   logout,
   requestPasswordReset,
   resetPassword,
+  revokeOwnSession,
 } from '../services';
 import { clearedSessionCookieHeaders, sessionCookieHeaders } from '../helpers/session-cookies';
 import { validated } from '../middlewares/validate';
@@ -62,6 +64,32 @@ export async function getMe(req: Request, res: Response): Promise<void> {
     user: identity,
     permissions: [...req.actor.permissions].sort(),
   });
+}
+
+/**
+ * `GET /auth/sessions` — the caller's own live sessions (docs/06 §7).
+ *
+ * There is no way to ask for another user's sessions: the service keys the query on the
+ * authenticated identity, so "which sessions exist" is never a client-supplied value.
+ */
+export async function getSessions(req: Request, res: Response): Promise<void> {
+  if (!req.actor || !req.session) {
+    throw new UnauthenticatedError();
+  }
+
+  const items = await listOwnSessions(req.actor, req.session.id);
+  res.status(200).json({ items });
+}
+
+/** `DELETE /auth/sessions/{id}` — revokes one of the caller's own sessions. */
+export async function deleteSession(req: Request, res: Response): Promise<void> {
+  if (!req.actor) {
+    throw new UnauthenticatedError();
+  }
+
+  const { params } = validated<unknown, { id: string }>(res);
+  await revokeOwnSession(params.id, req.actor, requestMeta(req));
+  res.status(204).end();
 }
 
 /**

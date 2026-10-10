@@ -294,6 +294,15 @@ export async function getTask(id: string, actor: Principal): Promise<TaskView> {
   return toView(task, parent.label);
 }
 
+/**
+ * Object-level visibility check for a task, reused by projections that must not outlive the
+ * parent's visibility (rule T2), e.g. a record's audit history (`docs/31` §5). Resolving the
+ * parent is what enforces it; a caller who may not see the parent receives NOT_FOUND.
+ */
+export function assertTaskVisible(id: string, actor: Principal): Promise<TaskView> {
+  return getTask(id, actor);
+}
+
 /** A compact parent label for the cross-parent "my tasks" view. */
 function parentLabelFor(task: TaskWithPeople): string {
   return `${task.parentType} · ${task.parentId.slice(0, 8)}`;

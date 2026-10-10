@@ -1,0 +1,163 @@
+{
+  "uid": "servicehub-overview",
+  "title": "ServiceHub — Service overview",
+  "description": "On-call view (docs/34 §8): RED metrics, worker liveness and integration circuit state. Each panel names the document that owns its metric, so a misleading panel is fixed in one place.",
+  "tags": ["servicehub", "on-call"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "variables": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Request rate by route (docs/34 §4.1 RED)",
+      "description": "Rate of completed requests, split by the route *pattern* — never a concrete id (§4.2 forbids high-cardinality labels).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route) (rate(servicehub_http_requests_total[5m]))",
+          "legendFormat": "{{route}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Error ratio (5xx)",
+      "description": "The ServiceHubErrorRateHigh rule's signal. Above 5% sustained is a page (docs/34 §7.2).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1 },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(servicehub_http_requests_total{status_class=\"5xx\"}[5m])) / sum(rate(servicehub_http_requests_total[5m]))",
+          "legendFormat": "5xx ratio"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Request latency p95 / p99",
+      "description": "From the latency histogram. Averaging would hide the tail, which is what users experience (docs/34 §4.2).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(servicehub_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(servicehub_http_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Worker last success (age)",
+      "description": "Seconds since each scheduled job last succeeded. This is what makes 'the queue is not moving' visible — the silent failure docs/25 §6 says must be impossible.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 300 },
+              { "color": "red", "value": 600 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - servicehub_job_last_success_timestamp_seconds",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Integration circuit state (docs/32 §8)",
+      "description": "0 closed, 1 half-open, 2 open. An open circuit fails fast on purpose; the remote is down.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": { "min": 0, "max": 2, "decimals": 0 },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "servicehub_integration_circuit_state",
+          "legendFormat": "{{integration}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Integration bulkhead queue",
+      "description": "Calls waiting for a slot. Sustained queueing means the remote is slower than its bulkhead allows — tune the integration's configuration rather than raising it blindly.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "servicehub_integration_bulkhead_queued",
+          "legendFormat": "{{integration}} queued"
+        },
+        {
+          "refId": "B",
+          "expr": "servicehub_integration_bulkhead_in_flight",
+          "legendFormat": "{{integration}} in flight"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Job runs by result",
+      "description": "Success and failure counters per job (docs/34 §7.2 'queue depth / dead letters growing').",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (job, result) (rate(servicehub_job_runs_total[5m]))",
+          "legendFormat": "{{job}} {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Process memory and uptime",
+      "description": "Runtime gauges. Uptime resetting is the restart signal (docs/34 §6).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "servicehub_process_resident_memory_bytes",
+          "legendFormat": "rss"
+        }
+      ]
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import request, { type Response, type Test } from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
@@ -373,6 +374,119 @@ describe('Unified search and reporting', () => {
     },
   );
 
+  dbIt('reports open and overdue task load, scoped to the caller (docs/30 §3.3)', async () => {
+    const aliceUser = await prisma.user.findUniqueOrThrow({ where: { email: ALICE_EMAIL } });
+    const adminUser = await prisma.user.findUniqueOrThrow({ where: { email: ADMIN_EMAIL } });
+    const bobUser = await prisma.user.findUniqueOrThrow({ where: { email: BOB_EMAIL } });
+
+    await prisma.task.createMany({
+      data: [
+        {
+          organizationId,
+          parentType: 'REQUEST',
+          parentId: randomUUID(),
+          title: 'Late for Alice',
+          status: 'IN_PROGRESS',
+          assigneeId: aliceUser.id,
+          createdById: adminUser.id,
+          dueAt: new Date(Date.now() - 60_000),
+        },
+        {
+          organizationId,
+          parentType: 'REQUEST',
+          parentId: randomUUID(),
+          title: 'Due tomorrow for Alice',
+          status: 'TODO',
+          assigneeId: aliceUser.id,
+          createdById: adminUser.id,
+          dueAt: new Date(Date.now() + 86_400_000),
+        },
+        {
+          organizationId,
+          parentType: 'REQUEST',
+          parentId: randomUUID(),
+          title: 'Late for Bob',
+          status: 'TODO',
+          assigneeId: bobUser.id,
+          createdById: adminUser.id,
+          dueAt: new Date(Date.now() - 60_000),
+        },
+      ],
+    });
+
+    const asAlice = await request(app)
+      .get(`${BASE}/reports/tasks.workload`)
+      .set('cookie', alice.cookie);
+    expect(asAlice.status).toBe(200);
+    expect(asAlice.body.report.scope).toBe('own');
+    // Alice sees her two tasks and exactly one of them is late (R1: from stored timestamps).
+    expect(asAlice.body.report.figures.open).toBe(2);
+    expect(asAlice.body.report.figures.overdue).toBe(1);
+    expect(asAlice.body.report.figures.overdueSharePercent).toBe(50);
+    expect(asAlice.body.report.figures.byStatus).toMatchObject({ IN_PROGRESS: 1, TODO: 1 });
+
+    // Bob's late task is invisible to her and counted tenant-wide.
+    const asAdmin = await request(app)
+      .get(`${BASE}/reports/tasks.workload`)
+      .set('cookie', admin.cookie);
+    expect(asAdmin.body.report.scope).toBe('any');
+    expect(asAdmin.body.report.figures.open).toBe(3);
+    expect(asAdmin.body.report.figures.overdue).toBe(2);
+  });
+
+  dbIt('reports notification delivery outcomes tenant-wide (docs/30 §3.3)', async () => {
+    const aliceUser = await prisma.user.findUniqueOrThrow({ where: { email: ALICE_EMAIL } });
+
+    await prisma.notification.createMany({
+      data: [
+        {
+          organizationId,
+          userId: aliceUser.id,
+          recipient: ALICE_EMAIL,
+          channel: 'EMAIL',
+          eventType: 'notification.request.assigned',
+          templateVersion: 'v1',
+          dedupeKey: 'report-depth-sent',
+          status: 'SENT',
+          sentAt: new Date(),
+        },
+        {
+          organizationId,
+          userId: aliceUser.id,
+          recipient: ALICE_EMAIL,
+          channel: 'EMAIL',
+          eventType: 'notification.request.assigned',
+          templateVersion: 'v1',
+          dedupeKey: 'report-depth-dead',
+          status: 'DEAD',
+          failureReason: 'Provider unavailable.',
+        },
+      ],
+    });
+
+    // A delivery figure is other people's mail metadata, so it is cross-team only.
+    const denied = await request(app)
+      .get(`${BASE}/reports/notifications.delivery`)
+      .set('cookie', alice.cookie);
+    expect(denied.status).toBe(403);
+
+    const allowed = await request(app)
+      .get(`${BASE}/reports/notifications.delivery`)
+      .set('cookie', admin.cookie);
+    expect(allowed.status).toBe(200);
+    const figures = allowed.body.report.figures as Record<string, number>;
+    expect(figures.delivered).toBeGreaterThanOrEqual(1);
+    expect(figures.deadLettered).toBeGreaterThanOrEqual(1);
+    // The published rate is the documented one: failures are FAILED + DEAD, never SKIPPED.
+    const total = figures.total as number;
+    expect(figures.failureRatePercent).toBe(
+      Math.round((((figures.failed ?? 0) + (figures.deadLettered as number)) / total) * 1000) / 10,
+    );
+    expect(figures.deliveryRatePercent).toBe(
+      Math.round(((figures.delivered as number) / total) * 1000) / 10,
+    );
+  });
+
   dbIt('uses PostgreSQL full-text search with highlighting (docs/30 §2.2/§2.4)', async () => {
     const response = await request(app).get(`${BASE}/search?q=VPN`).set('cookie', admin.cookie);
     const body = response.body as SearchBody;
@@ -397,10 +511,21 @@ describe('Unified search and reporting', () => {
     );
     const names = indexes.map((row) => row.indexname).sort();
     expect(names).toEqual([
+      'articles_search_idx',
+      'assets_search_idx',
       'catalog_items_search_idx',
       'incidents_search_idx',
       'service_requests_search_idx',
       'users_search_idx',
     ]);
+
+    // The article index carries `setweight` classes (title/summary above body), which the
+    // query vector must reproduce exactly or the planner will not use it (docs/09 §4).
+    const articles = await prisma.$queryRawUnsafe<Array<{ indexdef: string }>>(
+      `SELECT indexdef FROM pg_indexes WHERE indexname = 'articles_search_idx'`,
+    );
+    expect(articles[0]?.indexdef).toContain('setweight');
+    expect(articles[0]?.indexdef).toContain("'A'");
+    expect(articles[0]?.indexdef).toContain("'B'");
   });
 });

@@ -5,10 +5,12 @@ import {
   countMajorIncidents,
   incidentPriorityCounts,
   incidentStatusCounts,
+  notificationOutcomeCounts,
   requestPriorityCounts,
   requestStatusCounts,
   slaAttainment,
   taskStatusCounts,
+  taskWorkload,
   type ScopedReportWindow,
 } from '../models/report.model';
 
@@ -20,10 +22,13 @@ import {
  * period, time zone and scope it was run under (`R2`) — a number without its scope is not a
  * report.
  *
- * **Not yet implemented (tracked):** materialised aggregates and short-TTL caching
- * (`docs/30` §3.4) and the full metric catalogue of `§3.3`. Async exports and the export
- * audit record (`R4`/`R5`) live in `report-export.service.ts`. The metrics below are the
- * live, indexed ones.
+ * **Implemented metrics (`docs/30` §3.3):** the request, incident, task and SLA summaries,
+ * task workload/overdue (`24`) and notification delivery outcomes (`29`). **Still tracked
+ * as not implemented:** the time-based metrics that need a percentile over a duration
+ * (mean/median time to resolve, MTTR, approval turnaround), the KB and asset metrics, and
+ * materialised aggregates with a short-TTL cache (`§3.4`). Each remaining metric belongs to
+ * one owner document, so it is added where its owner changes. Async exports and the export
+ * audit record (`R4`/`R5`) live in `report-export.service.ts`.
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -34,7 +39,9 @@ const METRICS = [
   'requests.summary',
   'incidents.summary',
   'tasks.summary',
+  'tasks.workload',
   'sla.attainment',
+  'notifications.delivery',
 ] as const;
 export type ReportMetric = (typeof METRICS)[number];
 
@@ -142,6 +149,47 @@ export async function runReport(
     case 'tasks.summary': {
       const status = await taskStatusCounts(window);
       figures = { byStatus: toCountMap(status, 'status') };
+      break;
+    }
+    case 'tasks.workload': {
+      // `docs/30` §3.3, owner `24`: open load, the late subset, and completions in the
+      // period. The share is null rather than 0% when nothing is open, because a share of
+      // an empty set is undefined and "0% late" would be a lie.
+      const workload = await taskWorkload({ ...window, now });
+      figures = {
+        open: workload.open,
+        overdue: workload.overdue,
+        completedInWindow: workload.completedInWindow,
+        overdueSharePercent:
+          workload.open === 0 ? null : Math.round((workload.overdue / workload.open) * 1000) / 10,
+        byStatus: toCountMap(workload.byStatus, 'status'),
+      };
+      break;
+    }
+    case 'notifications.delivery': {
+      // `docs/30` §3.3, owner `29`. Tenant-wide: a row is one person's delivery attempt.
+      if (scope !== 'any') {
+        throw new ForbiddenError('Notification delivery is a cross-team report.');
+      }
+      const rows = await notificationOutcomeCounts({ organizationId, from, to });
+      const byStatus = toCountMap(rows, 'status');
+      const total = rows.reduce((sum, row) => sum + row.count, 0);
+      const delivered = (byStatus.SENT ?? 0) + (byStatus.DELIVERED ?? 0);
+      const failed = byStatus.FAILED ?? 0;
+      const deadLettered = byStatus.DEAD ?? 0;
+      figures = {
+        total,
+        delivered,
+        failed,
+        deadLettered,
+        // A skipped row is a recipient preference, not a delivery failure (`docs/29` §7),
+        // so it is reported separately and never folded into the failure rate.
+        skipped: byStatus.SKIPPED ?? 0,
+        deliveryRatePercent: total === 0 ? null : Math.round((delivered / total) * 1000) / 10,
+        failureRatePercent:
+          total === 0 ? null : Math.round(((failed + deadLettered) / total) * 1000) / 10,
+        byStatus,
+      };
       break;
     }
     case 'sla.attainment': {

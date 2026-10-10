@@ -354,10 +354,18 @@ describe('SLA sweep and pause/resume', () => {
 
     const resumed = await prisma.slaClock.findFirstOrThrow({ where: { id: paused.id } });
     expect(resumed.pausedAt).toBeNull();
-    expect(resumed.totalPausedSeconds).toBeGreaterThanOrEqual(3590);
     expect(resumed.stoppedAt).not.toBeNull();
-    // The target was pushed out by roughly the paused duration.
+
+    // The pause excludes only the *working* minutes inside it (docs/25 §14 AC2), so the
+    // shift can never exceed the wall-clock pause and can never move the target
+    // backwards. This bound is calendar- and time-of-day independent by construction;
+    // the exact arithmetic for a working-hours calendar is asserted with explicit
+    // timestamps in `sla-worked-examples.test.ts`, which does not read the wall clock.
+    const wallPauseSeconds = Math.round((Date.now() - pausedAt.getTime()) / 1000);
     const shiftMs = resumed.targetAt.getTime() - before.targetAt.getTime();
-    expect(shiftMs).toBeGreaterThanOrEqual(3_590_000);
+    expect(shiftMs).toBeGreaterThanOrEqual(0);
+    expect(shiftMs).toBeLessThanOrEqual((wallPauseSeconds + 5) * 1000);
+    expect(resumed.totalPausedSeconds).toBeGreaterThanOrEqual(0);
+    expect(resumed.totalPausedSeconds).toBeLessThanOrEqual(wallPauseSeconds + 5);
   });
 });

@@ -10,3 +10,7 @@ coverage/
 *.log
 prisma/*.db
 prisma/*.db-journal
+
+# Uploaded object bytes (docs/19 §7.1) — never committed.
+storage/
+.storage*/

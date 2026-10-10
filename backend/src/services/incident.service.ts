@@ -674,7 +674,13 @@ export async function resolveIncident(
         organizationId: incident.organizationId,
         eventType: OUTBOX_EVENT.INCIDENT_RESOLVED,
         idempotencyKey: `incident.resolved:${incident.id}:${randomUUID()}`,
-        payload: { incidentId: incident.id, reference: incident.reference },
+        // The reporter is told the incident they raised is resolved (`docs/29` §5); the
+        // payload carries the id, not an address.
+        payload: {
+          incidentId: incident.id,
+          reference: incident.reference,
+          reporterId: incident.reporterId,
+        },
       },
       tx,
     );

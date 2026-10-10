@@ -54,16 +54,21 @@ export async function claimReportExport(id: string, client: DataClient = prisma)
   return result.count > 0;
 }
 
+/**
+ * Records a completed export. The CSV's **bytes are already in object storage**; only its key
+ * is persisted (`ADR-0004`, `19` §7.1), so completing a job never writes file content to the
+ * database.
+ */
 export function markReportExportSucceeded(
   id: string,
-  input: { content: string; rowCount: number; expiresAt: Date },
+  input: { storageKey: string; rowCount: number; expiresAt: Date },
   client: DataClient = prisma,
 ): Promise<ReportExport> {
   return client.reportExport.update({
     where: { id },
     data: {
       status: 'SUCCEEDED',
-      content: input.content,
+      storageKey: input.storageKey,
       rowCount: input.rowCount,
       expiresAt: input.expiresAt,
       completedAt: new Date(),

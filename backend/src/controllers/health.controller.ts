@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
-import { checkReadiness } from '../services';
+import { checkReadiness, renderMetrics } from '../services';
 import { AppError } from '../utils/errors';
 
 /**
@@ -55,4 +55,18 @@ export async function deps(_req: Request, res: Response, next: NextFunction): Pr
   } catch (error) {
     next(error);
   }
+}
+
+/**
+ * Prometheus scrape endpoint (docs/34 §4).
+ *
+ * It answers from the in-process registry only — no database query, no cache round trip
+ * — so scraping cannot add load to the things it is measuring. Like the other probes it
+ * is mounted outside the rate limiter and is **internal only**: it must not be reachable
+ * from the public internet (`34` §6), because route names and request volumes are
+ * reconnaissance material even without any record data.
+ */
+export function metrics(_req: Request, res: Response): void {
+  res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.status(200).send(renderMetrics());
 }

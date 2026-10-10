@@ -1,5 +1,8 @@
+import type { Readable } from 'node:stream';
 import { config } from '../config';
+import { contentDisposition, sanitizeFilename } from '../helpers/file-sniff';
 import { assertPermission, type Principal } from '../helpers/authorization';
+import { fileStorage, newStorageKey } from '../integrations/storage';
 import { ForbiddenError, NotFoundError } from '../utils/errors';
 import {
   claimReportExport,
@@ -15,6 +18,7 @@ import {
 } from '../models';
 import { AUDIT_ACTION, AUDIT_ENTITY } from './audit-events';
 import type { RequestMeta } from './context';
+import { AUDIT_EXPORT_METRIC, renderAuditCsv } from './audit-export.service';
 import { REPORT_METRICS, runReport, type ReportResult } from './report.service';
 
 /**
@@ -30,11 +34,27 @@ import { REPORT_METRICS, runReport, type ReportResult } from './report.service';
  *     completion records the result. Exfiltration is accountable.
  *   - **Time-limited.** The content expires; the view states when.
  *
- * **v1 stores the CSV inline (`CR-0003`).** `docs/19`/`ADR-0004` put files in object
- * storage; that adapter does not exist yet, so the content is a column and the model is
- * shaped so a storage key can replace it. Download is limited to the **requester**: the
- * export is scoped to them, so another user downloading it could read data they cannot.
+ * **The CSV lives in object storage, not in a column** (`ADR-0004`, `docs/19` §7.1, closing the
+ * `CR-0003` interim). The worker renders the file and writes it through the storage adapter,
+ * persisting only the key; `s3` in production and `local` in development, chosen by
+ * configuration. Two consequences that matter: an export produced by one instance is
+ * downloadable from another, and a database dump is no longer a bulk data export.
+ *
+ * Download is limited to the **requester**: the export is scoped to them, so another user
+ * downloading it could read data they cannot. When the driver can issue one, the download is a
+ * short-lived signed URL; otherwise the API streams the file (`19` §7.3).
  */
+
+/** Where a download's bytes come from once ownership and expiry have been checked. */
+export type ReportDownloadTarget =
+  | { kind: 'redirect'; url: string }
+  | {
+      kind: 'stream';
+      stream: Readable;
+      contentType: string;
+      filename: string;
+      disposition: string;
+    };
 
 export interface ReportExportView {
   id: string;
@@ -157,25 +177,65 @@ export async function getExport(actor: Principal, id: string): Promise<ReportExp
   return toView(row, new Date());
 }
 
-/** The export's content for download, enforcing ownership and expiry. */
-export async function downloadExport(
-  actor: Principal,
-  id: string,
-): Promise<{ filename: string; content: string }> {
+/**
+ * The export's bytes for download, enforcing ownership and expiry before any storage access.
+ *
+ * The order is deliberate: authorize, then read. Nothing touches the object store until the
+ * caller has been proved to be the requester and the link is still live, so a guessed id or an
+ * expired key cannot even cause a storage fetch.
+ */
+export async function downloadExport(actor: Principal, id: string): Promise<ReportDownloadTarget> {
   const row = await findReportExportById(id);
   if (!row || row.organizationId !== actor.organizationId || row.requestedById !== actor.userId) {
     throw new NotFoundError('Export not found.');
   }
   const now = new Date();
-  if (row.status !== 'SUCCEEDED' || !row.content) {
+  if (row.status !== 'SUCCEEDED' || !row.storageKey) {
     throw new NotFoundError('Export is not ready.');
   }
   if (row.expiresAt !== null && row.expiresAt <= now) {
-    // Expired links degrade; the report can be regenerated (`docs/30` §8).
+    // Expired links degrade; the report can be regenerated (`docs/30` §8). The object itself
+    // is not deleted here — retention is a maintenance job (`19` §7.4), and a purge must not
+    // be the side effect of one download attempt.
     throw new NotFoundError('Export has expired. Request a new export.');
   }
+
   const stamp = row.createdAt.toISOString().slice(0, 19).replace(/[:T]/g, '-');
-  return { filename: `${row.metric}-${stamp}.csv`, content: row.content };
+  return openStoredExport(row, `${row.metric}-${stamp}.csv`);
+}
+
+/**
+ * Opens an **already-authorised** export's bytes (`ADR-0004`, `docs/19` §7.3).
+ *
+ * Shared by the report and audit download paths, which differ only in which permission and
+ * scope they check before calling this. Keeping the storage access in one place means the two
+ * cannot drift into one redirecting a signed URL and the other streaming bytes — a difference
+ * an operator would only discover from a support ticket.
+ */
+export async function openStoredExport(
+  row: ReportExport,
+  filename: string,
+): Promise<ReportDownloadTarget> {
+  if (!row.storageKey) {
+    throw new NotFoundError('Export is not ready.');
+  }
+  const safe = sanitizeFilename(filename);
+  const storage = fileStorage();
+
+  const signed = await storage.signedDownloadUrl(row.storageKey);
+  if (signed) return { kind: 'redirect', url: signed };
+
+  const stream = await storage.open(row.storageKey);
+  if (!stream) {
+    throw new NotFoundError('Export not found.');
+  }
+  return {
+    kind: 'stream',
+    stream,
+    contentType: 'text/csv; charset=utf-8',
+    filename: safe,
+    disposition: contentDisposition(safe, false),
+  };
 }
 
 /**
@@ -201,21 +261,35 @@ export async function processQueuedExports(
         continue;
       }
 
-      const params = (row.params ?? {}) as { from?: string; to?: string };
-      const report = await runReport(principal, row.metric, {
-        ...(params.from ? { from: params.from } : {}),
-        ...(params.to ? { to: params.to } : {}),
-      });
-      const { content, rowCount } = reportToCsv(report);
+      const params = (row.params ?? {}) as Record<string, unknown>;
+      // The shared job table carries two kinds of export; the metric selects the renderer
+      // (`docs/30` §5, `docs/31` §10). Both apply the requester's own authorization.
+      const isAuditExport = row.metric === AUDIT_EXPORT_METRIC;
+      const { content, rowCount } = isAuditExport
+        ? await renderAuditCsv(principal, params)
+        : reportToCsv(
+            await runReport(principal, row.metric, {
+              ...(params.from ? { from: String(params.from) } : {}),
+              ...(params.to ? { to: String(params.to) } : {}),
+            }),
+          );
       const expiresAt = new Date(Date.now() + config.REPORT_EXPORT_TTL_MINUTES * 60_000);
 
-      await markReportExportSucceeded(row.id, { content, rowCount, expiresAt });
+      // Bytes go to object storage, outside any transaction (`docs/33` §11), and only the key
+      // is persisted. A storage failure fails the job and is recorded on the export, so the
+      // requester sees a reason instead of a permanently QUEUED row.
+      const storageKey = newStorageKey(row.organizationId);
+      await fileStorage().put(storageKey, Buffer.from(content, 'utf8'), 'text/csv; charset=utf-8');
+
+      await markReportExportSucceeded(row.id, { storageKey, rowCount, expiresAt });
       await writeAudit({
         organizationId: row.organizationId,
         actorId: row.requestedById,
         actorType: 'SYSTEM',
-        action: AUDIT_ACTION.REPORT_EXPORT_COMPLETED,
-        entityType: AUDIT_ENTITY.REPORT_EXPORT,
+        action: isAuditExport
+          ? AUDIT_ACTION.AUDIT_EXPORT_COMPLETED
+          : AUDIT_ACTION.REPORT_EXPORT_COMPLETED,
+        entityType: isAuditExport ? AUDIT_ENTITY.AUDIT_EXPORT : AUDIT_ENTITY.REPORT_EXPORT,
         entityId: row.id,
         after: { metric: row.metric, rowCount, expiresAt: expiresAt.toISOString() },
         correlationId: `export:${row.id}`,

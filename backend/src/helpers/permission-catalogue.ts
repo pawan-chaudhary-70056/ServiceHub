@@ -82,6 +82,13 @@ export const PERMISSIONS: readonly PermissionDef[] = [
   P('audit:read.team', 'Read audit records for the caller’s team'),
   P('audit:read.all', 'Read all audit records in the tenant'),
   P('audit:read.security', 'Read security-class audit records'),
+  P('audit:export', 'Export audit records (audited)'),
+
+  // Integrations (docs/32 §11). `admin:config` already covers configuring an integration
+  // itself; these grants cover the webhook subscriptions it exposes.
+  P('integration:manage', 'Manage webhook subscriptions'),
+  P('integration:read', 'View integration status, health and deliveries'),
+  P('integration:retry', 'Retry a dead-lettered integration delivery (audited)'),
 
   P('report:read', 'Read reports and dashboards'),
   P('report:read.all', 'Read cross-team reports (lead/admin)'),
@@ -135,6 +142,8 @@ export const TENANT_ROLES: readonly RoleDef[] = [
       'task:update.own',
       'report:read',
       'kb:article:read',
+      // A holder sees the assets they hold (docs/07 §3 matrix: Asset read = O (own)).
+      'asset:read.own',
     ],
   },
   {
@@ -191,6 +200,7 @@ export const TENANT_ROLES: readonly RoleDef[] = [
       'report:export',
       'asset:read.any',
       'audit:read.team',
+      'audit:export',
     ],
   },
   {
@@ -263,6 +273,10 @@ export const TENANT_ROLES: readonly RoleDef[] = [
       'asset:manage',
       'asset:assign',
       'audit:read.all',
+      'audit:export',
+      'integration:manage',
+      'integration:read',
+      'integration:retry',
       'report:read',
       'report:read.all',
       'report:export',
@@ -281,6 +295,7 @@ export const TENANT_ROLES: readonly RoleDef[] = [
       'incident:read.any',
       'asset:read.any',
       'audit:read.all',
+      'audit:export',
       'report:read',
       'kb:article:read',
     ],

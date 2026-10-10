@@ -1,12 +1,20 @@
 import type { Server } from 'node:http';
+// First, always: loads a local `backend/.env` (when one exists) **before** `./config`
+// validates the environment at import time, so `npm start` and `npm run dev` work on a
+// machine that has a `.env` rather than requiring every variable to be exported
+// (`config/load-env.ts`). A real environment still wins.
+import './config/load-env';
 import { createApp } from './app';
-import { config } from './config';
+import { config, processRole, runsSchedulers, servesHttp } from './config';
 import { disconnectRedis } from './integrations/redis';
 import { disconnectDatabase } from './models';
 import {
+  startInboundWebhookScheduler,
   startNotificationScheduler,
   startReportExportScheduler,
+  startRosterSyncScheduler,
   startSlaSweepScheduler,
+  startWebhookScheduler,
 } from './services';
 import { logger } from './utils/logger';
 
@@ -19,22 +27,53 @@ import { logger } from './utils/logger';
  * this instance to finish in-flight requests before it disappears.
  */
 
+// `docs/03` §3: the worker does not serve HTTP, and the API does not own the schedulers. A
+// process configured as the worker tier must not start the HTTP listener; a process configured
+// as the API tier starts only the listener. Refusing beats silently starting the wrong tier.
+if (!servesHttp(processRole)) {
+  logger.fatal(
+    { PROCESS_ROLE: processRole },
+    'The API entrypoint requires PROCESS_ROLE=api or all; start the worker entrypoint (dist/worker.js) for the worker tier.',
+  );
+  process.exit(1);
+}
+
 const app = createApp();
 
 const server: Server = app.listen(config.PORT, () => {
-  logger.info({ port: config.PORT, env: config.NODE_ENV }, 'ServiceHub API listening');
+  logger.info(
+    { port: config.PORT, env: config.NODE_ENV, PROCESS_ROLE: processRole },
+    'ServiceHub API listening',
+  );
 });
 
-// The SLA breach/at-risk sweep (`docs/25` §6). Leadership is a Redis lock, so every
-// instance may start the scheduler and exactly one sweeps per tick.
-const slaSweep = startSlaSweepScheduler();
-
-// The notifications outbox drain (`docs/29` §3). Same leadership model: every instance
-// may start it, and the Redis lock elects one drainer per tick.
-const notifications = startNotificationScheduler();
-
-// The async report export worker (`docs/30` §3.4). Same single-leader model.
-const reportExports = startReportExportScheduler();
+/**
+ * The background schedulers (`docs/03` §6, `docs/25` §6, `docs/29` §3, `docs/30` §3.4, `docs/32`).
+ *
+ * Each takes a short-lived Redis lock per tick, so every instance may start one while a single
+ * leader sweeps per tick. They are started here only for `PROCESS_ROLE=all` — the honest
+ * single-process developer default. An `api`-role deployment starts none of them: the worker
+ * workload owns the queue, and N API instances each scheduling is exactly the defect `docs/03`
+ * J5 names. The two entrypoints start the same six, in the same order, so they cannot drift.
+ */
+const schedulers = runsSchedulers(processRole)
+  ? [
+      // The SLA breach/at-risk sweep (`docs/25` §6).
+      startSlaSweepScheduler(),
+      // The notifications outbox drain (`docs/29` §3).
+      startNotificationScheduler(),
+      // The async report export worker (`docs/30` §3.4).
+      startReportExportScheduler(),
+      // The outbound webhook worker (`docs/32` §4): fan out new events, then deliver what is
+      // due. Delivery never happens on the request path.
+      startWebhookScheduler(),
+      // The inbound webhook processor (`docs/32` §5): receive is request-path and only verifies,
+      // persists and acks; this worker validates and dispatches what was received.
+      startInboundWebhookScheduler(),
+      // The roster sync sweep (`docs/32` §6). A no-op unless a directory adapter is configured.
+      startRosterSyncScheduler(),
+    ]
+  : [];
 
 /**
  * Graceful shutdown:
@@ -64,9 +103,7 @@ async function shutdown(signal: string): Promise<void> {
   }, SHUTDOWN_TIMEOUT_MS);
   forceExit.unref();
 
-  slaSweep.stop();
-  notifications.stop();
-  reportExports.stop();
+  for (const scheduler of schedulers) scheduler.stop();
 
   server.close(async (error) => {
     if (error) {

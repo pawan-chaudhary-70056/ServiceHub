@@ -46,6 +46,28 @@ export function listTeamsWithMembers(
   });
 }
 
+/**
+ * One team with its members, scoped to the tenant **inside the query** (ADR-0002).
+ *
+ * Used by the membership surface rather than loading every team and filtering afterwards:
+ * a post-fetch filter is the shape that eventually returns another tenant's row.
+ */
+export function findTeamWithMembersById(
+  id: string,
+  organizationId: string,
+  client: DataClient = prisma,
+): Promise<TeamWithMembers | null> {
+  return client.team.findFirst({
+    where: { id, organizationId },
+    include: {
+      members: {
+        include: { user: { select: { id: true, email: true, displayName: true } } },
+        orderBy: { createdAt: 'asc' },
+      },
+    },
+  });
+}
+
 export function createTeam(
   data: { organizationId: string; name: string; description: string | null },
   client: DataClient = prisma,
@@ -91,4 +113,19 @@ export function listTeamIdsForUser(
   return client.teamMember
     .findMany({ where: { organizationId, userId }, select: { teamId: true } })
     .then((rows) => rows.map((row) => row.teamId));
+}
+
+/**
+ * The user ids on one team.
+ *
+ * Used by the audit explorer to resolve a lead's scope to the **members** of their teams;
+ * it is a predicate for that query, never a post-fetch filter (`docs/31` §5).
+ */
+export function listTeamMemberUserIds(
+  teamId: string,
+  client: DataClient = prisma,
+): Promise<string[]> {
+  return client.teamMember
+    .findMany({ where: { teamId }, select: { userId: true } })
+    .then((rows) => rows.map((row) => row.userId));
 }

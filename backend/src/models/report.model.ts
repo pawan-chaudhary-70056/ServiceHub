@@ -1,3 +1,4 @@
+import type { TaskStatus } from '@prisma/client';
 import { prisma, type DataClient } from './db';
 
 /**
@@ -129,6 +130,97 @@ export async function taskStatusCounts(params: ScopedReportWindow, client: DataC
           ? {}
           : { OR: [{ assigneeId: params.userId }, { createdById: params.userId }] },
       ],
+    },
+    _count: { _all: true },
+  });
+  return rows.map((row) => ({ status: row.status as string, count: row._count._all }));
+}
+
+/** A task is open while it is not completed and not cancelled (`docs/24` §3). */
+const OPEN_TASK_STATUSES: TaskStatus[] = ['TODO', 'IN_PROGRESS', 'BLOCKED'];
+
+/**
+ * Task scope for reporting. A task is visible to its assignee and to whoever raised it,
+ * because a task inherits its parent's visibility through that pair (`docs/24` rule T2);
+ * `any` is the tenant-wide grant.
+ */
+function taskScope(p: ScopedReportWindow) {
+  if (p.scope === 'any') return {};
+  return { OR: [{ assigneeId: p.userId }, { createdById: p.userId }] };
+}
+
+export interface TaskWorkload {
+  byStatus: Array<{ status: string; count: number }>;
+  open: number;
+  overdue: number;
+  completedInWindow: number;
+}
+
+/**
+ * Open task load and the overdue subset (`docs/30` §3.3, owner `24`).
+ *
+ * `open` and `overdue` are snapshots taken at generation time, not figures over the
+ * window: "how much work is late right now" is the question an overdue count answers, and
+ * measuring it over a past window would report tasks finished since as still late. The
+ * window applies to `completedInWindow`, which is a genuine period measure.
+ */
+export async function taskWorkload(
+  params: ScopedReportWindow & { now: Date },
+  client: DataClient = prisma,
+): Promise<TaskWorkload> {
+  const scope = taskScope(params);
+  const [byStatus, overdue, completedInWindow] = await Promise.all([
+    client.task.groupBy({
+      by: ['status'],
+      where: {
+        organizationId: params.organizationId,
+        status: { in: OPEN_TASK_STATUSES },
+        AND: [scope],
+      },
+      _count: { _all: true },
+    }),
+    client.task.count({
+      where: {
+        organizationId: params.organizationId,
+        status: { in: OPEN_TASK_STATUSES },
+        // A null due date is not late; `lt` excludes it at the database.
+        dueAt: { lt: params.now },
+        AND: [scope],
+      },
+    }),
+    client.task.count({
+      where: {
+        organizationId: params.organizationId,
+        // `DONE` is the completed state of a task (`docs/24` §3); CANCELLED is not work done.
+        status: 'DONE',
+        completedAt: { gte: params.from, lt: params.to },
+        AND: [scope],
+      },
+    }),
+  ]);
+
+  const rows = byStatus.map((row) => ({ status: row.status as string, count: row._count._all }));
+  return {
+    byStatus: rows,
+    open: rows.reduce((sum, row) => sum + row.count, 0),
+    overdue,
+    completedInWindow,
+  };
+}
+
+/**
+ * Notification outcomes over a window (`docs/30` §3.3, owner `29`).
+ *
+ * Tenant-wide by construction: the row is a delivery attempt to one person, so a
+ * per-recipient figure would report other people's mail metadata. The caller therefore
+ * needs the cross-team grant — the same rule as SLA attainment.
+ */
+export async function notificationOutcomeCounts(params: ReportWindow, client: DataClient = prisma) {
+  const rows = await client.notification.groupBy({
+    by: ['status'],
+    where: {
+      organizationId: params.organizationId,
+      createdAt: { gte: params.from, lt: params.to },
     },
     _count: { _all: true },
   });

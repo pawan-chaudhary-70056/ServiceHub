@@ -17,6 +17,9 @@ import {
   type IncidentPriority,
   type IncidentUrgency,
 } from '../api/incidents.api';
+import { AttachmentPanel } from '../components/attachment-panel';
+import { KnowledgePanel } from '../components/knowledge-panel';
+import { RecordHistoryPanel } from '../components/record-history-panel';
 import { StatusBadge } from '../components/status-badge';
 import { TasksPanel } from '../components/tasks-panel';
 import { useAuth } from '../hooks/auth-context';
@@ -331,6 +334,18 @@ export function IncidentDetailPage() {
         parentId={data.id}
         canCreate={hasPermission('task:create')}
       />
+
+      {/* Linked knowledge (docs/27 §9). The articles applied while resolving the incident,
+          each shown at the version that was linked (rule K6). */}
+      <KnowledgePanel entityType="INCIDENT" entityId={data.id} />
+
+      {/* Files (docs/19 §7): same parent record, same visibility — the reporter or an agent
+          attaches, and the server inherits this incident's authorization rule. */}
+      <AttachmentPanel entityType="Incident" entityId={data.id} />
+
+      {/* Record history (docs/31 §11): the incident's own audit trail, authorised by the
+          incident's visibility rather than by an audit grant. */}
+      <RecordHistoryPanel entityType="Incident" entityId={data.id} />
 
       <section aria-labelledby="conversation-heading" className="space-y-3">
         <h2 id="conversation-heading" className="text-lg font-semibold text-content">

@@ -193,3 +193,62 @@ export function addWorkingMinutes(start: Date, minutes: number, calendar: Calend
   // callers get a deterministic, non-crashing value. The configuration defect is the bug.
   return start;
 }
+
+/**
+ * Returns the number of **working** minutes inside the half-open interval `[from, to)`.
+ *
+ * This is the inverse of `addWorkingMinutes` and exists for one reason: to exclude a
+ * paused interval without double-counting the non-working time the calendar has already
+ * frozen (docs/25 §14 AC2). A pause that spans a night or a weekend contains hours in
+ * which the clock was not running anyway, so shifting a target by the interval's
+ * *wall-clock* length would grant the record budget it never had.
+ *
+ * A 24×7 calendar has no frozen time, so its working minutes are the wall-clock minutes.
+ */
+export function workingMinutesBetween(from: Date, to: Date, calendar: CalendarSpec): number {
+  if (!(to > from)) {
+    return 0;
+  }
+  if (calendar.model === 'WALL_CLOCK') {
+    return Math.floor((to.getTime() - from.getTime()) / MINUTE_MS);
+  }
+
+  const holidaySet = new Set(calendar.holidays);
+  let totalMs = 0;
+  let cursor = from;
+
+  for (let day = 0; day < 730 && cursor < to; day += 1) {
+    const parts = localParts(cursor, calendar.timeZone);
+
+    if (!holidaySet.has(dateKey(parts))) {
+      for (const window of calendar.workingHours[parts.weekday] ?? []) {
+        const windowStart = localToInstant(
+          parts.year,
+          parts.month,
+          parts.day,
+          Math.floor(minutesOfDay(window.start) / 60),
+          minutesOfDay(window.start) % 60,
+          calendar.timeZone,
+        );
+        const windowEnd = localToInstant(
+          parts.year,
+          parts.month,
+          parts.day,
+          Math.floor(minutesOfDay(window.end) / 60),
+          minutesOfDay(window.end) % 60,
+          calendar.timeZone,
+        );
+
+        const overlapStart = windowStart > from ? windowStart : from;
+        const overlapEnd = windowEnd < to ? windowEnd : to;
+        if (overlapEnd > overlapStart) {
+          totalMs += overlapEnd.getTime() - overlapStart.getTime();
+        }
+      }
+    }
+
+    cursor = localToInstant(parts.year, parts.month, parts.day + 1, 0, 0, calendar.timeZone);
+  }
+
+  return Math.floor(totalMs / MINUTE_MS);
+}

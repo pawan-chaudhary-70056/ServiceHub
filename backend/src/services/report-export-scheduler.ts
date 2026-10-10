@@ -1,6 +1,7 @@
 import { config } from '../config';
 import { isRedisConfigured, redisCommand, redisKey } from '../integrations/redis';
 import { logger } from '../utils/logger';
+import { recordJobRun } from './metrics.service';
 import { processQueuedExports } from './report-export.service';
 
 /**
@@ -33,8 +34,10 @@ export function startReportExportScheduler(
 
     try {
       await processQueuedExports();
+      recordJobRun('report_export', true);
     } catch (error) {
       // Export processing is off the request path; a failure must never crash the process.
+      recordJobRun('report_export', false);
       logger.error({ err: error }, 'Report export processing failed');
     }
   };

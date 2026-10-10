@@ -23,7 +23,9 @@ const METRICS = [
   { key: 'requests.summary', label: 'Requests' },
   { key: 'incidents.summary', label: 'Incidents' },
   { key: 'tasks.summary', label: 'Tasks' },
+  { key: 'tasks.workload', label: 'Task workload' },
   { key: 'sla.attainment', label: 'SLA attainment' },
+  { key: 'notifications.delivery', label: 'Notification delivery' },
 ] as const;
 
 function isoDaysAgo(days: number): string {
@@ -229,6 +231,38 @@ function ReportFigures({ metric, figures }: { metric: string; figures: Record<st
         <Figure label="Breached" value={figures.breached} />
         <Figure label="Attainment" value={formatPercent(figures.attainmentPercent)} />
       </dl>
+    );
+  }
+
+  if (metric === 'tasks.workload') {
+    return (
+      <div className="space-y-4">
+        <dl className="grid gap-4 sm:grid-cols-4">
+          <Figure label="Open" value={figures.open} />
+          <Figure label="Overdue" value={figures.overdue} />
+          <Figure label="Completed in period" value={figures.completedInWindow} />
+          <Figure label="Overdue share" value={formatPercent(figures.overdueSharePercent)} />
+        </dl>
+        <CountTable title="Open by status" counts={figures.byStatus} />
+      </div>
+    );
+  }
+
+  if (metric === 'notifications.delivery') {
+    return (
+      <div className="space-y-4">
+        <dl className="grid gap-4 sm:grid-cols-4">
+          <Figure label="Delivered" value={figures.delivered} />
+          <Figure label="Failed" value={figures.failed} />
+          <Figure label="Dead-lettered" value={figures.deadLettered} />
+          <Figure label="Failure rate" value={formatPercent(figures.failureRatePercent)} />
+        </dl>
+        <p className="text-sm text-content-muted">
+          A skipped row is a recipient preference, not a delivery failure (`docs/29` §7), so it is
+          counted separately and excluded from the failure rate.
+        </p>
+        <CountTable title="By status" counts={figures.byStatus} />
+      </div>
     );
   }
 

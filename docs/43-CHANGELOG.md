@@ -36,6 +36,721 @@ Notes:    what changed and, where non-obvious, why. Include a **Supersedes** lin
 
 ## 3. Documentation Changelog
 
+### 2026-10-11 — Operator password recovery: a guarded, audited reset command
+- **Type:** Feature / Process
+- **Refs:** `10` §8, `06` §4/§6/§7, `31` §3.1, `33` C3, `17`, `43`
+- **Affects:** `docs/10` §8, `43`; backend `prisma/reset-operator-password.ts` (new),
+  `package.json` (`operator:reset-password`), `.env.example`
+- **Notes:**
+  - **The gap this closes is a real one and was found in use, not in review.** The bootstrap
+    is deliberately guarded — once a platform operator exists it refuses, because a second
+    operator is a deliberate act. That left **no supported way to recover the first
+    operator's password**: the only stored form is an Argon2id hash, and the plaintext was
+    supplied once via `BOOTSTRAP_OPERATOR_PASSWORD`. The alternative was an ad-hoc console
+    edit under time pressure, which is how a superadmin credential ends up shared in a chat.
+  - **Same discipline as the bootstrap.** No default or invented password
+    (`OPERATOR_NEW_PASSWORD` is required); it refuses an ambiguous target rather than picking
+    one (more than one operator with no `OPERATOR_EMAIL`); it validates against the
+    application's **own** policy and hashing helpers, so the reset cannot drift from what
+    login accepts or from the configured Argon2id parameters; it **revokes every live
+    session** (`06` §7 — a reset that leaves an attacker's session alive has not reset
+    anything); and it writes a `password.reset` audit row with actor type `SYSTEM` in the
+    same transaction as the change (`31` §3.1), carrying `via: operator-reset-command` so a
+    security review can tell an operator-driven change from a self-service one.
+  - **It never prints the password.** Whoever supplied it already has it, and a tool that
+    echoes a credential is a tool that writes one into a shell history.
+  - **Verified end to end, not just typechecked.** The guards were exercised (missing
+    password, unknown email, policy failure — all refused with exit code 1 and a specific
+    message), then a generated policy-satisfying password was applied and the login flow was
+    driven against a running server: `POST /api/v1/auth/login` returned `200` with the
+    session and CSRF cookies and the platform permission set, while a wrong password returned
+    `401` — which is what proves the credential actually changed. The audit row and the
+    updated `passwordChangedAt` were read back from the database.
+  - **Operational note.** This is a credential surface: `OPERATOR_NEW_PASSWORD` must be
+    supplied through the environment (or a secret manager, `17`) and never committed, and the
+    command is intended to be run by someone entitled to it, with the audit row as the record.
+
+### 2026-10-11 — Phase 3 increment 29: Report and audit exports move to object storage (`CR-0003` superseded)
+- **Type:** Feature / Breaking (internal) / Docs
+- **Refs:** `ADR-0004`, `19` §7.1/§7.3/§7.4, `30` §3.1/§5, `31` §10, `33` §11, `42` §4.5/§6, `40` §12, `43`
+- **Affects:** `docs/42` §4.5/§6, `40` §12, `43`; backend `prisma/schema.prisma`
+  (`ReportExport`), migration `20261010194724_report_export_object_storage`,
+  `models/report-export.model.ts`, `services/report-export.service.ts`,
+  `services/audit-export.service.ts`, `controllers/search.controller.ts`,
+  `controllers/audit.controller.ts`, `services/index.ts`; tests
+  `tests/report-export.integration.test.ts`
+- **Notes:**
+  - **`CR-0003`'s interim is over.** Report exports stored the rendered CSV inline in a
+    `report_exports.content` column, accepted by the Tech Lead on 2026-10-07 as a Phase 2
+    deviation from `ADR-0004` that was to be resolved "with the S3 adapter in Phase 3". The
+    adapter landed (attachments), so this is that migration: the worker renders the CSV, writes
+    it through the storage adapter and persists **only the key**. The column is dropped in
+    migration `20261010194724_report_export_object_storage`.
+  - **Two consequences that were the point of the deviation's expiry.** An export produced by
+    one instance is downloadable from another, and a database dump is no longer a bulk data
+    export — which is exactly the property `ADR-0004` exists to give.
+  - **Downloads follow `19` §7.3, shared with attachments.** `s3` issues a short-lived signed
+    URL and the API **redirects** (no bytes through the backend); `local` streams the file.
+    Report and audit exports go through one function (`openStoredExport`), so the two cannot
+    drift into serving differently — a difference an operator would only find in a ticket.
+  - **Authorize, then read.** Ownership, readiness and expiry are checked before any storage
+    access, so a guessed id or an expired link causes no object-store fetch at all. Expiry
+    deliberately does not delete the object: retention is a maintenance job (`19` §7.4), and a
+    purge must not be a side effect of one download attempt.
+  - **`CR-0003` is recorded `Superseded`**, not edited away: the register (`42` §6) and §4.5 both
+    carry a dated resolution line, and the original text is left intact (`43` L1).
+  - **Verified.** The integration suite drives a real export through the worker and then asserts
+    the row carries a storage key matching the key pattern and that the object is readable
+    through the configured driver, in addition to the existing download assertions.
+
+### 2026-10-11 — Phase 3 increment 28: The worker as its own process tier
+- **Type:** Feature / Process
+- **Refs:** `03` §3/§6/§7 (J5), `34` §4/§6, `35` §3/§6, `33` §1, `40` §12, `43`
+- **Affects:** `docs/40` §12, `43`; backend `src/worker.ts` (new), `src/server.ts`,
+  `src/config/env.ts`, `src/config/index.ts`, `src/jobs/index.ts`, `package.json`,
+  `Dockerfile`; tests `tests/process-role.test.ts`
+- **Notes:**
+  - **The schedulers now have their own workload.** Every worker previously ran in-process in
+    the API, so the API tier owned the queue by accident. `PROCESS_ROLE` makes the tier
+    explicit — `all` (HTTP **and** schedulers, the honest single-process developer default),
+    `api` (HTTP only) and `worker` (schedulers only, **no HTTP listener**, because `docs/03` §3
+    says a worker must not serve HTTP). This is the "separate worker process / queue consumer"
+    item the changelog has carried since increment 3.
+  - **The wrong tier is refused, not started.** Each entrypoint exits with a fatal log when
+    asked for the other tier's work, so a misconfigured deployment fails at boot instead of
+    double-scheduling: `N` API instances each taking the per-tick lock is the defect `docs/03`
+    J5 names, and the lock hides it until the lock has a bad day. Verified by running both
+    entrypoints with the opposite role — both exit `1` with the refusal logged.
+  - **Scaling is now independent of the API.** API instances scale with request load and the
+    worker with queue depth (`docs/33` §1, "scale by measurement"), a stuck job cannot occupy
+    an API process, and deploying the API no longer restarts the workers mid-job. The
+    leadership model is unchanged: each scheduler still takes its short-lived Redis lock per
+    tick, so `N` worker replicas are safe and exactly one sweeper runs per tick.
+  - **The image has a worker target.** `backend/Dockerfile` gains a `worker` stage from the
+    production stage with `HEALTHCHECK NONE` — the inherited probe checks `/health/live`, and a
+    worker serves no HTTP by design, so an inherited probe would report a healthy worker as dead
+    forever.
+  - **Verified, not asserted.** `npm run build` then `PROCESS_ROLE=worker node dist/worker.js`
+    starts and logs the worker banner; `PROCESS_ROLE=worker node dist/server.js` and
+    `PROCESS_ROLE=api node dist/worker.js` both refuse with exit code 1. `tests/process-role.test.ts`
+    pins the role predicates and the rejection of an unknown role.
+
+### 2026-10-11 — Phase 3 increment 27: Worker liveness for every job, and the alerting/dashboard layer
+- **Type:** Feature / Docs / Process
+- **Refs:** `34` §4/§7/§8/§11, `25` §6, `32` §8, `35` §6, `40` §12, `43`
+- **Affects:** `docs/40` §12, `43`; backend `services/webhook-scheduler.ts`,
+  `services/notification-scheduler.ts`, `services/report-export-scheduler.ts`,
+  `services/inbound-webhook-scheduler.ts`, `services/roster-sync-scheduler.ts`; new
+  `ops/observability/{README.md,prometheus/prometheus.yml,prometheus/alerts.yml,grafana/dashboards/servicehub-overview.json}`;
+  `docker-compose.yml`; tests `tests/observability-assets.test.ts`
+- **Notes:**
+  - **Only the SLA sweep reported its runs, so five of six workers were invisible.** `34` §7.2
+    pages on "SLA sweep stalled" *and* "queue depth / dead letters growing", but
+    `recordJobRun` was called from exactly one scheduler — so "has the notification drain
+    succeeded recently?" could not be asked, and a stalled drain looked identical to an idle
+    one. Every scheduler now records its run: `notification_drain`, `report_export`,
+    `webhook_delivery`, `inbound_webhook` and `roster_sync`, alongside the existing
+    `sla_sweep`. The signal was already in `34`; this makes it emitted.
+  - **The alert rules are a deployment artifact with the same rigour as code.**
+    `ops/observability/prometheus/alerts.yml` implements the `34` §7.2 core-alert table —
+    availability, error ratio, latency SLO burn, worker stalls, failing jobs, open integration
+    circuits, bulkhead saturation, memory and restart loops. Each rule names an **owner**, a
+    **severity**, the **threshold and where it came from**, and a **`runbook_url`** into `36`,
+    because §7.1 says an alert without a runbook is noise. Rate-based conditions are expressed
+    on rates, not absolute state, so a single blip cannot flap a page (§7.1).
+  - **A drift guard, because these references are strings.** Nothing in TypeScript checked the
+    metric names written in the rules and the dashboard, so a rename in the registry would
+    have broken alerting quietly. `tests/observability-assets.test.ts` asserts that every
+    `servicehub_*` metric named in `ops/observability` is a family the registry actually
+    exposes, that every alert carries owner/severity/runbook/an expression, and that every
+    dashboard panel has a query.
+  - **Local parity.** A `prometheus` service is wired into `docker-compose.yml` reading the
+    same rule file, so the alerts can be evaluated against the real metrics without a
+    deployment.
+  - **Stated limits.** The rules have not been evaluated against a running Prometheus in this
+    repository (`promtool check rules` needs Prometheus, which is not installed here); the YAML
+    and JSON are syntax-validated locally and structurally by the test above. No Grafana
+    container is wired, and no tracing exporter exists (`34` §5) — the correlation id already
+    threads a request through logs and audit, and a collector is the remaining step.
+
+### 2026-10-11 — Phase 3 increment 26: The integration reliability patterns and the `admin:config` configuration surface
+- **Type:** Feature / Docs
+- **Refs:** `32` §2/§7/§8/§11/§12/§13, `34` §4, `17` §3, `35` §6, `11` §9, `12`, `19` §3, `31`, `37`
+- **Affects:** `docs/11` §9, `40` §12, `43`; backend `integrations/resilience.ts`,
+  `integrations/index.ts` (unchanged), `services/webhook.service.ts`,
+  `services/notification.service.ts`, `services/integration-config.service.ts`,
+  `services/metrics.service.ts`, `services/audit-events.ts`, `controllers/integration-config.controller.ts`,
+  `routes/webhook.routes.ts`, `models/integration-setting.model.ts`, `models/index.ts`,
+  `validators/integration-config.validators.ts`, `config/env.ts`, `prisma/schema.prisma`;
+  frontend `api/integrations.api.ts`, `pages/integrations.page.tsx`; tests
+  `tests/resilience.test.ts`, `tests/integration-config.integration.test.ts`,
+  `tests/setup.ts`, `frontend/src/pages/integrations.page.test.tsx`
+- **Notes:**
+  - **The two missing `32` §8 patterns now exist and are applied.** §8 lists timeout, retry,
+    circuit breaker, bulkhead, dead letter and backpressure; timeout, bounded retry and dead
+    letter were already in place per adapter, and **circuit breaker and bulkhead were not**.
+    `integrations/resilience.ts` adds both as one reliability layer, keyed **per named
+    integration** — the isolation boundary — so `email` and `webhook:<subscriptionId>` share
+    neither a breaker nor a bulkhead. An open breaker fails fast instead of paying a timeout
+    per attempt, and a bounded bulkhead (with a bounded wait queue) stops one slow remote from
+    consuming the capacity of another (§8 bulkhead, §9 "no single integration failure").
+  - **Wrapped where the external call is, not around it.** `deliverPendingWebhooks` now sends
+    each delivery through `runResilient('webhook:<subscriptionId>', …)` and the notification
+    drain sends through `runResilient('email', …)`. Both convert a rejection into the
+    **same negative result** their adapter returns, so a fast-fail is retried and eventually
+    dead-lettered exactly like a transport failure — no new path, no throw onto the request
+    path. The registry is process-global by design: the memory of recent failures *is* the
+    pattern.
+  - **An explicit dead-letter retry clears the breaker.** An operator requeueing a delivery is
+    asserting the subscriber has been fixed, so `retryDeadLetterForCaller` resets that
+    subscription's circuit. Without it the automatic fast-fail would reject the human's action
+    for the rest of the cooldown; the breaker exists to stop *automatic* retries, not to
+    overrule an operator.
+  - **The configuration surface the document names now exists** (`32` §11 "Configure
+    integrations — `admin:config` (audited)", §12 `POST/PATCH /admin/integrations/{id}`).
+    `GET/PATCH /admin/integrations/config[/{key}]` plus `POST …/{key}/test` serve a catalogue
+    (`email`, `directory`, `webhooks`, `inbound_webhooks`) with the effective reliability
+    tuning, an enabled flag, a connectivity test and a **credential reference**. The reference
+    is the point: credentials are runtime-injected and never persisted (`17` §3, `35`), so the
+    field accepts `env:NAME` and **rejects a value** with `422` — a request cannot smuggle a
+    secret into a field whose purpose is to hold none. Every change is audited with a
+    before/after that carries the reference and never the secret.
+  - **Configuration is validated per key**, against the catalogue rather than a free-form blob,
+    and the same catalogue drives the admin UI so the screen cannot drift from the backend.
+  - **Metrics.** Three gauges join `34` §4: `servicehub_integration_circuit_state`
+    (0 closed / 1 half-open / 2 open), `…_bulkhead_in_flight` and `…_bulkhead_queued`, per
+    integration — the fastest way to see "the remote is down" and whether an integration is
+    starting to back up before its queue dead-letters.
+  - **Test isolation was a real defect this exposed.** A test that deliberately drives a
+    provider to failure left an open circuit for every later test in the file, because the
+    registry is process-global. `tests/setup.ts` now clears it between tests (dynamically
+    imported, so setup still does not import application config before the environment
+    defaults are set). Two pre-existing suite failures were caused by exactly this leak and are
+    fixed at the cause, not by relaxing an assertion.
+  - **M4's remaining gap narrows to the object-storage decision and the async antivirus
+    hook.** Circuit-breaker/bulkhead tuning and credential/configuration administration were
+    the two named blockers; both are delivered here. What is still open for M4 is the
+    time-based report metrics and cached aggregates, the N8 provider webhooks, per-identity
+    rate-limit keying, the separate worker process, the observability stack (`34`) and every
+    Phase 4 hardening criterion.
+
+### 2026-10-09 — Phase 3 increment 25: Notification depth, team administration UI, and two more report metrics
+- **Type:** Feature / Fix / Docs
+- **Refs:** `29` §4/§5/§8, `26` A7, `23` §8, `24` §3, `30` §3.3, `07` §6, `11` §9, `16`, `37`
+- **Affects:** `docs/11` §9, `40` §12, `43`; backend `services/notification-templates.ts`,
+  `services/notification-events.ts`, `services/notification.service.ts`,
+  `services/approval.service.ts`, `services/incident.service.ts`, `models/user.model.ts`,
+  `models/report.model.ts`, `services/report.service.ts`; frontend `api/teams.api.ts`,
+  `pages/teams.page.tsx`, `pages/reports.page.tsx`, `routes/index.tsx`,
+  `components/app-shell.tsx`; tests `tests/notification-templates.test.ts`,
+  `tests/notifications.integration.test.ts`, `tests/search.integration.test.ts`,
+  `frontend/src/pages/teams.page.test.tsx`, `frontend/src/pages/reports.page.test.tsx`
+- **Notes:**
+  - **Notification depth (`29` §5, F-12).** Two templates existed — invitation and password
+    reset — so **no operational event could send an email at all**: a payload named people by
+    id, and the worker only knew how to read an address. Ten domain templates now exist
+    (request/incident/task assignment, task raised, approval requested/advanced/reassigned,
+    approval approved/rejected, incident resolved) and the worker resolves a payload's
+    **user ids** to addresses at send time (`resolveEmailRecipients`). Resolving late is the
+    point: a queued event goes to the mailbox the person has *now*, the payload holds no
+    personal data at rest (`19` §3), and the same declaration serves the in-app channel.
+  - **One event, several recipients, still exactly once.** An approval step addresses a list
+    of approvers, so the email path became a loop over recipients, each under its own
+    `(eventId, recipient, channel)` dedupe key (`29` N3/N4). The outbox row is released only
+    when **every** recipient is terminal; a recipient awaiting a retry keeps the row
+    undrained, and those already `SENT` are skipped rather than mailed twice. `result.delivered`
+    now counts messages, not events.
+  - **A latent crash, found by the new tests.** In-app delivery trusted the payload: an id that
+    no longer resolved to a user violated `notifications_user_id_fkey` and **threw out of the
+    drain**, breaking the "never throws" invariant of `29` §3. Both channels now narrow
+    declared ids with `findNotifiableUserIds` — the user must exist **and** belong to the
+    event's tenant (`ADR-0002`), so a stale id is skipped with a warning and a foreign id can
+    never surface another tenant's work in someone's in-app centre. The test that caught it
+    (an approver who has left the tenant) is kept as the regression case.
+  - **Payloads enriched where the recipient was simply missing (`29` §5).** The reassignment
+    payload carried no request id, so its in-app notification had **no link to follow**; it now
+    carries `requestId` and `reference`. Approval outcome events now name the `requesterId`
+    (`26` A7: the decision moves the request on its own, so the requester is told), and the
+    incident-resolution event names the `reporterId` (`23` §8). Both now also produce an in-app
+    entry, which is the gap `#3` of `tochange.md` §7 named.
+  - **Team administration UI (`07` §6).** The membership write surface landed in increment 24
+    with no way to reach it: a team could be created by an API call and by a test fixture, and
+    membership could not be managed at all. `/teams` (guarded by `user:manage`, in the primary
+    navigation beside Users) lists teams, creates one, shows a team's members with their role,
+    adds or re-roles a member and removes one. The picker offers **active tenant users only**,
+    because the server refuses anyone else and a picker that offers a refusal is a trap.
+  - **Two more metrics (`30` §3.3).** `tasks.workload` (owner `24`) reports open load by
+    status, the overdue subset and completions in the period; `overdue` is a **snapshot at
+    generation time**, because "how much work is late right now" is what an overdue count
+    answers, while `completedInWindow` is the genuine period measure. `notifications.delivery`
+    (owner `29`) reports outcomes by status with delivery and failure rates, and is
+    **cross-team only** — a row is one person's delivery attempt, so a narrower scope would be
+    a report of other people's mail metadata. A `SKIPPED` row is a recipient preference
+    (`29` §7), never a failure, and is excluded from the failure rate.
+  - **Verification (all run after the last change to each artifact, `pipefail` preserved).**
+    Backend `format:check`, `eslint`, `tsc --noEmit`, `tsc -p tsconfig.build.json` clean;
+    **336 tests / 36 files** pass (was 326). Frontend `format:check`, `eslint`, `tsc --noEmit`
+    clean, `vite build` succeeds, **79 tests / 24 files** pass (was 72). Both CI secret-scan
+    passes return no match over the working tree. No check was skipped and no assertion
+    weakened; `tsc` caught a real mistake during the work — the completed task status is
+    `DONE`, not `COMPLETED`.
+  - **Still not implemented, and named so the next increment does not have to rediscover it.**
+    The time-based metrics (`30` §3.3: mean/median time to resolve, MTTR, approval turnaround)
+    need a duration percentile the query layer does not express yet; the KB (`27` §6) and asset
+    (`28`) metrics, materialised aggregates with a short-TTL cache (`30` §3.4), the N8 provider
+    webhooks (bounce/complaint/delivery feedback), per-identity rate-limit keying, a separate
+    worker process, the observability stack (`34`), the browser E2E journeys (`37` §7) and the
+    Phase 4 hardening items are all still open (`40` §12).
+
+### 2026-10-09 — Fix: the secret-scan gate was failing on its own test fixtures
+- **Type:** Fix / Security
+- **Refs:** `20` §3 ("Secrets scan: any match, without exception"), `37` §2 (fixtures), `38`
+- **Affects:** `.github/workflows/ci.yml` (secret-scan job), `backend/tests/storage-s3.test.ts`,
+  `40` §12, `43`
+- **Notes:**
+  - **A gate that cannot pass is not a gate.** The single-pattern scan matched 13 tracked test
+    files, because `const OPERATOR_PASSWORD = 'Operator-Passphrase!23'` is a secret-shaped name
+    assigned 19 characters — exactly what the pattern looks for. Verified against the command
+    CI runs (`git grep` over tracked files): it exits `0` on `main`, so the job fails on every
+    push and the real signal is buried under fixture noise.
+  - **The fix is not an exclusion, it is two passes with different jobs.** Pass 1 keeps the
+    broad "secret-shaped name" pattern for source and configuration and excludes test files,
+    reason stated in the workflow. Pass 2 restores coverage where it matters most — a live
+    credential pasted into a fixture — by matching **provider credential shapes** (private-key
+    blocks, AWS `AKIA…`, Stripe/`whsec_`/SendGrid prefixes) across **every** file, tests
+    included. Neither pass is weaker than the check it replaces for the risk it names.
+  - **The new pass caught this session's own fixture.** `backend/tests/storage-s3.test.ts` used
+    a fake access key id shaped like a real AWS one; it now uses a deliberately unshaped value,
+    with the reason recorded at the fixture, so the next person does not reintroduce it.
+  - **Verification.** Both passes were run over the whole working tree (not just tracked files)
+    and return no match; the three workflow files still parse and expose the same jobs; the
+    changed test files pass (`20` tests across the storage and attachment suites).
+  - **Supersedes.** The `secret-scan` step as written in `ci.yml` before this entry; `20` §3's
+    rule is unchanged — any match still fails the build, without exception.
+
+### 2026-10-09 — Phase 3 increment 24: Security headers, session self-service, team administration, metrics and the security-scan pipeline
+- **Type:** Security / Feature / Docs
+- **Refs:** `17` §5, `06` §7, `07` §3/§6, `34` §4/§6/§7, `20` §2/§3, `19` §1, `11` §9, `38` §3
+- **Affects:** `docs/11` §9, `40` §7/§12, `43`; backend `src/app.ts`,
+  `src/services/metrics.service.ts`, `src/middlewares/metrics.ts`,
+  `src/controllers/health.controller.ts`, `src/routes/health.routes.ts`,
+  `src/services/sla-sweep-scheduler.ts`, `src/services/auth.service.ts`,
+  `src/controllers/auth.controller.ts`, `src/routes/auth.routes.ts`,
+  `src/models/session.model.ts`, `src/services/teams.service.ts`,
+  `src/controllers/teams.controller.ts`, `src/routes/teams.routes.ts`,
+  `src/validators/team.validators.ts`, `src/models/team.model.ts`,
+  `src/services/audit-events.ts`, `src/services/index.ts`; frontend `nginx.conf`,
+  `index.html`, `public/favicon.svg`, `public/.well-known/security.txt`,
+  `api/auth.api.ts`, `pages/security.page.tsx`, `routes/index.tsx`,
+  `components/app-shell.tsx`; CI
+  `.github/workflows/codeql.yml`, `.github/workflows/dast.yml`, `.github/workflows/ci.yml`,
+  `.zap/rules.tsv`; tests `tests/metrics.test.ts`,
+  `tests/sessions-and-teams.integration.test.ts`, `tests/health.test.ts`
+- **Notes:**
+  - **Security headers are pinned, not defaulted (`17` §5).** `helmet()` was replaced with an
+    explicit policy — `default-src 'self'`, no `unsafe-inline` for scripts, `frame-ancestors
+    'none'`, HSTS for a year — and `frontend/nginx.conf` now sends **CSP and HSTS** (they were
+    absent). nginx inherits `add_header` destructively inside a `location`, so each location
+    that sets a cache header repeats the security set rather than silently dropping it. A test
+    asserts the directives, so a dependency bump cannot relax them unnoticed.
+  - **Session self-service (`06` §7).** `GET /auth/sessions` and `DELETE /auth/sessions/{id}`:
+    the query is keyed on the authenticated user, so there is no id to substitute; another
+    user's session is `404`; revocation is durable (the row is kept) and audited as
+    `session.revoke` with the cache entry dropped afterwards. The **account security page**
+    (`/account/security`) is the surface — a session list that labels the current device and
+    offers a one-click revocation, because a control a user cannot reach is a control in name
+    only.
+  - **Team administration (`07` §3/§6).** Teams were read-only, so a team could only be
+    created by a test fixture. `POST /teams` and the membership write surface (`GET`/`POST`
+    `/teams/{id}/members`, `DELETE /teams/{id}/members/{userId}`) now take `user:manage`,
+    not `catalog:read` — membership decides which records a team-scoped grant resolves to,
+    so it is user administration. A member must be an **active user of the same tenant**
+    (`422` otherwise), and creation/removal are both audited.
+  - **Metrics (`34` §4).** A dependency-free Prometheus registry exposes RED metrics
+    labelled by **route pattern** (a concrete path or record id never becomes a label —
+    cardinality *and* a data-protection concern), a latency histogram, process gauges, and
+    `job_last_success/failure_timestamp_seconds`. The SLA sweep records its runs, because
+    "sweep stalled" is a page-level alert (`34` §7) and a silent SLA failure must be
+    impossible (`25` §6). `GET /health/metrics` answers from memory: scraping adds no
+    database load.
+  - **Security scans wired (`20` §2/§3).** CodeQL SAST on every PR (`security-extended`),
+    a Trivy IaC/container scan on every build, and a nightly OWASP ZAP baseline against
+    the configured staging target with the accepted-rule list in `.zap/rules.tsv`. These
+    are **pipelines, not evidence**: none has run in a real environment yet, which is why
+    Gate 2 is still not claimed (see `40` §12).
+  - **Coverage.** `tests/metrics.test.ts` (7) pins the label rules, buckets and the scrape
+    endpoint; `tests/sessions-and-teams.integration.test.ts` (8) covers ownership, the
+    cross-tenant team `404`, the `user:manage` guard and both audit events;
+    `tests/health.test.ts` gains the header assertions.
+
+### 2026-10-09 — Phase 3 increment 23: File attachments (`19` §7, F-16)
+- **Type:** Feature / Docs
+- **Refs:** `19` §7/§8, `ADR-0004`, `07` §4, `08` §3, `09` Q11, `FR-FILE-001`, `11` §9,
+  `12`, `16`, `22` R10, `28`
+- **Affects:** `docs/11` §9, `40` §7, `43`; backend `prisma/schema.prisma` (migration
+  `20261009084814_add_attachments`), `models/attachment.model.ts`, `models/index.ts`,
+  `helpers/multipart.ts`, `helpers/file-sniff.ts`, `integrations/storage.ts`,
+  `services/attachment.service.ts`, `controllers/attachment.controller.ts`,
+  `routes/attachment.routes.ts`, `routes/index.ts`, `validators/attachment.validators.ts`,
+  `services/index.ts`, `services/audit-events.ts`, `config/env.ts`; frontend
+  `api/client.ts` (`apiUpload`), `api/attachments.api.ts`, `components/attachment-panel.tsx`,
+  `pages/request-detail.page.tsx`, `pages/incident-detail.page.tsx`, `pages/article.page.tsx`;
+  tests `tests/attachments.integration.test.ts`, `tests/file-upload.test.ts`,
+  `tests/storage-s3.test.ts`, `tests/storage-local.test.ts`,
+  `components/attachment-panel.test.tsx`; `backend/.gitignore`, `backend/tests/setup.ts`
+- **Notes:**
+  - **F-16 was the only feature in `05` with no code.** The `Attachment` entity is the shared
+    child-table design of `08` §3 — keyed on `(entityType, entityId)` with `organizationId` in
+    the same predicate (index Q11) — and hangs off requests, incidents and articles
+    (`FR-FILE-001`).
+  - **Bytes live in object storage (`ADR-0004`), not on a backend.** `integrations/storage.ts`
+    defines the domain-owned `FileStorage` boundary with an **S3-compatible driver** (SigV4
+    presigned GET for serving, header-signed PUT for storing — no vendor SDK) and a **local
+    driver** for development and tests. `env.ts` **refuses to boot in production** with the
+    local driver, because instance-local files are exactly the failure `19` §7.1 describes.
+  - **The upload path is separate from the 1 MB JSON parser (`19` §7.2 rule 4).** A bounded
+    multipart reader enforces the cap **while reading**, so a lying `Content-Length` is cut off
+    mid-stream rather than buffered; extent, count and type are then checked before any write.
+  - **The scan step is synchronous sniffing, and the status gate is the control.** A payload
+    that sniffs as HTML, script, SVG or an executable — or whose bytes disagree with its
+    declared type — is rejected `422 FILE_REJECTED`, retained as a `QUARANTINED` row and
+    audited; the stored content type is the **sniffed** one. Nothing is retrievable until the
+    row is `AVAILABLE`, and a `PENDING`/`QUARANTINED` row is a `404` on every path — listing
+    included. An asynchronous antivirus hook is the remaining gap (recorded, not hidden).
+  - **Attachments are never more visible than their parent (`07` §4).** There is no
+    attachment permission: list, upload and download all resolve the parent through the owning
+    service's own object-level check, an invisible parent is `404`, and authorization is
+    re-checked on **every** download so a revoked session or a lost record access stops the
+    bytes. Downloads are audited (`attachment.download`), because an attachment is classified
+    Confidential (`19` §1).
+  - **Serving follows `19` §7.3.** Non-images are `application/octet-stream` with an
+    `attachment` disposition (never renderable in a tab), images inline with their real type,
+    always `nosniff`, `Cache-Control: private, no-store` and a restrictive CSP; the S3 driver
+    redirects to a signed, short-lived URL instead of proxying bytes.
+  - **Caps:** 10 MB per file, 25 MB per request, 20 per record (all configurable
+    `FILE_*` values), with the per-record count checked **inside** the write transaction.
+  - **UI.** `AttachmentPanel` on request, incident and article detail: lists what the server
+    called available with size, uploader and a download link; uploads with the same cap stated
+    as a cause and a remedy (`16`); and hides the form where the caller has no authoring grant.
+  - **Coverage.** `tests/attachments.integration.test.ts` (11) walks §8's own list — unscanned
+    not retrievable, quarantined never served, spoof rejected by sniffing, cross-parent `404`,
+    revoked session refused, cap enforced, downloads audited, CSRF required, oversized `413`;
+    `tests/file-upload.test.ts` (14) pins the parser, the streaming cap and the allow-list;
+    `tests/storage-s3.test.ts` (5) and `tests/storage-local.test.ts` (4) cover both drivers —
+    the S3 signing path had none, and the test found a real inconsistency: the local driver
+    validated storage keys while the S3 driver did not, so a malformed key would have been
+    signed and sent. Both now refuse it before a request is built. The S3 suite also exposed
+    the honest limit that the driver has never run against a live bucket;
+    `components/attachment-panel.test.tsx` (4) covers the panel.
+
+### 2026-10-08 — Phase 3 increment 22: Inbound user-roster sync (`32` §6)
+- **Type:** Feature / Docs
+- **Refs:** `32` §6/§7/§11/§12/§14, `06` (identity), `07` §5, `11` §9
+- **Affects:** `docs/11` §9, `40` §7/§12, `43`; backend `prisma/schema.prisma` (migration
+  `20261008052517_add_roster_sync`), `integrations/index.ts`,
+  `integrations/directory.ts`, `models/roster.model.ts`, `models/organization.model.ts`,
+  `services/roster-sync.service.ts`, `services/roster-sync-scheduler.ts`,
+  `controllers/roster-sync.controller.ts`, `validators/roster-sync.validators.ts`,
+  `routes/webhook.routes.ts`, `services/index.ts`, `models/index.ts`, `server.ts`,
+  `config/env.ts`, `services/audit-events.ts`; tests
+  `tests/roster-sync.integration.test.ts`, `tests/webhooks.integration.test.ts`
+- **Notes:**
+  - **Identity is keyed on the source's immutable `externalId`, never on email (`§6`).** The
+    `DirectoryUserMapping` table is the anchor; email is used **once**, to adopt an existing
+    local account on first contact, and never afterwards. Adoption is also refused when the
+    matching email belongs to another tenant, so a directory cannot reach across tenants.
+  - **Deactivate, never delete (`§6`).** A person missing from the roster, or marked inactive,
+    is set `INACTIVE`; the user row, its history and its mapping all survive. This is the rule
+    that makes a directory outage survivable.
+  - **The drift guard aborts rather than "corrects" (`§6`/`§14`).** A run that would
+    deactivate more than `ROSTER_SYNC_MAX_REMOVAL_FRACTION` (default 20%) of known people
+    stops, records `ABORTED` with the reason and alerts — and applies **nothing**, because the
+    guard runs before any write. An operator who intends the removal passes `confirmDrift`,
+    and the audit records that they did.
+  - **An unreachable directory is not an empty roster.** The adapter is fetched *before* the
+    reconciliation loop; a failure records `FAILED` and never reaches the deactivation path.
+  - **Idempotent and resumable (`§6`).** A repeat run changes nothing; the state carries a
+    checkpoint written per batch, so a long run resumes instead of restarting.
+  - **Source of truth per attribute (`§6`).** The roster owns `displayName` only. It does not
+    overwrite email, roles or team membership, and it **never reactivates** a locally
+    deactivated account — a decision the directory does not know about.
+  - **Scheduled, single-leader (`§6`).** `startRosterSyncScheduler` sweeps every tenant under a
+    Redis lock and is a **no-op when no directory is configured**, so an environment without
+    one does not log a failure on every interval. `GET`/`POST /admin/integrations/roster-sync`
+    expose status and an audited manual run.
+  - **Adapter boundary (`§3`).** The domain owns `DirectoryAdapter`; the vendor lives only in
+    `integrations/directory.ts`, and the unconfigured adapter **fails** rather than reporting
+    an empty roster.
+  - **Coverage.** `tests/roster-sync.integration.test.ts` (8) covers create/mapping on first
+    run, idempotency, the owned-attribute update, deactivation, the drift abort and its
+    confirmation, no-resurrection, and tenant-safe adoption; `tests/webhooks.integration.test.ts`
+    (now 10) covers the status and trigger endpoints and their guards.
+  - **Remaining (`32`):** circuit-breaker/bulkhead tuning and credential/configuration
+    administration. M4 stays **partially** met (`40` §7), though inbound sync was its main gap.
+
+### 2026-10-08 — Phase 3 increment 21: The integration health board (`32` §12/§13)
+- **Type:** Feature / Docs
+- **Refs:** `32` §12/§13, `11` §9, `09` (indexing), `33` §7
+- **Affects:** `docs/11` §9, `40` §7/§12, `43`; backend `prisma/schema.prisma` (migration
+  `20261008051242_add_inbound_last_attempt_at`), `models/webhook.model.ts`,
+  `models/inbound-webhook.model.ts`, `services/integration-health.service.ts`,
+  `services/index.ts`, `controllers/webhook.controller.ts`, `routes/webhook.routes.ts`,
+  `tests/webhooks.integration.test.ts`; frontend `api/integrations.api.ts`,
+  `pages/integrations.page.tsx`, `pages/integrations.page.test.tsx`
+- **Notes:**
+  - **`GET /admin/integrations` returns one uniform row per integration** — outbound
+    subscription or inbound endpoint — carrying last success, last error, dead-letter count,
+    success/failure totals and a derived error rate (`32` §12 "status, last success, last
+    error"). A single shape across both directions means an operator watching the board does
+    not learn two vocabularies.
+  - **`healthy` is derived, never stored**, from the rows themselves: unhealthy once a
+    dead-lettered failure exists, or a failure more recent than the last success. A stored
+    flag could disagree with the data; a derived one cannot.
+  - **Aggregated without an N+1 (`09`, `33` §7).** Per-integration counts, maxima and the
+    most recent error come from a fixed set of `groupBy`/`distinct` queries, not a loop — a
+    health board that runs one query per integration is exactly the query pattern that scales
+    worse than the page it serves.
+  - **`InboundWebhookEvent` gained `lastAttemptAt`** so "last error at" is the time of the
+    failure, not the time the event was received; the outbound model already carried it.
+  - **The board is on the integrations page** (`32` §13), unhealthy-first, with a summary
+    badge and a 30-second refresh so a failure surfaces without a manual reload.
+  - **Coverage.** `tests/webhooks.integration.test.ts` (now 9) asserts a healthy row, a
+    dead-lettered row and an inbound row all appear correctly, and that the board is behind
+    `integration:read`; `pages/integrations.page.test.tsx` (now 10) adds the health board,
+    the **inbound-endpoint create flow** (secret and path revealed once) and **secret
+    rotation** for both directions.
+  - **Remaining (`32`):** inbound sync (`§6`) and circuit-breaker/bulkhead tuning. M4 stays
+    **partially** met (`40` §7).
+
+### 2026-10-08 — Phase 3 increment 20: Integration administration UI and the event vocabulary endpoint (`32` §13)
+- **Type:** Feature / Docs
+- **Refs:** `32` §4/§5/§7/§11/§12/§13, `11` §9, `14`, `16`
+- **Affects:** `docs/11` §9, `43`; backend `controllers/webhook.controller.ts`,
+  `routes/webhook.routes.ts`, `tests/webhooks.integration.test.ts`; frontend
+  `api/integrations.api.ts`, `pages/integrations.page.tsx`, `routes/index.tsx`,
+  `components/app-shell.tsx`, `tests`/`pages/integrations.page.test.tsx`
+- **Notes:**
+  - **One screen, three surfaces (`32` §13), because an operator diagnosing a broken
+    integration needs all of them at once:** webhook subscriptions (outbound, §4), inbound
+    endpoints (receive, §5), and a **dead-letter viewer** with explicit retry for both
+    directions (§13).
+  - **The secret is shown once, from the create response only.** The UI surfaces a minted
+    signing or verification secret in a one-time panel and every other view shows only the
+    `secretHint`; the page never refetches a secret because the API never returns one again
+    (`32` §7).
+  - **The page exposes entitlements, it does not enforce them.** Manage controls require
+    `integration:manage` and retry controls `integration:retry`; the screen hides what the
+    caller cannot use so it is honest, and the server refuses independently (`32` §11,
+    `07` §6).
+  - **New read endpoint `GET /admin/webhooks/events`** (`integration:read`) returns the
+    subscribable event vocabulary from the outbox event catalogue, so the subscription form
+    selects real event names instead of a list the UI author maintained by hand (`32` §4).
+  - **Coverage.** `pages/integrations.page.test.tsx` (5) asserts the entitlement boundary,
+    the one-time secret and the retry path; `tests/webhooks.integration.test.ts` gains a case
+    for the event vocabulary endpoint and its guard (now 8).
+  - **Remaining (`32`):** inbound sync (`§6`), credential/config administration, the health
+    board (`GET /admin/integrations` — last success/last error per integration), and
+    circuit-breaker/bulkhead tuning. M4 stays **partially** met (`40` §7).
+
+### 2026-10-08 — Phase 3 increment 19: Inbound webhooks (`32` §5)
+- **Type:** Feature / Docs
+- **Refs:** `32` §5/§7/§12/§13/§15 (AC2), `18` (trust boundary), `33` §6, `11` §9
+- **Affects:** `docs/32` §12, `11` §9, `40` §7/§12, `43`; backend `prisma/schema.prisma`
+  (migration `20261008044903_add_inbound_webhooks`), `models/inbound-webhook.model.ts`,
+  `services/inbound-webhook.service.ts`, `services/inbound-webhook-scheduler.ts`,
+  `controllers/inbound-webhook.controller.ts`, `routes/inbound-webhook.routes.ts`,
+  `validators/inbound-webhook.validators.ts`, `routes/index.ts`, `server.ts`, `app.ts`,
+  `config/env.ts`, `services/audit-events.ts`; tests
+  `tests/inbound-webhooks.integration.test.ts`
+- **Notes:**
+  - **Order is the design (`32` §5): verify → persist the raw event → ack (`202`) → process
+    in a worker.** Receive never processes, so a slow handler cannot make a provider retry
+    and amplify load; the raw payload is persisted first, so nothing is lost if it does.
+  - **The public route has no session** — the HMAC signature over the raw body is the only
+    authentication. The exact bytes are captured by a `verify` hook on the JSON body parser
+    (`app.ts`), because re-serialising the parsed object can change key order and break
+    verification. Unsigned, malformed, stale-timestamp and unknown-key deliveries all return
+    **`401`** — identical, so the endpoint cannot be probed by comparing status codes. The
+    route is CSRF-exempt (an external caller holds no cookie session) but stays behind the
+    application rate limiter, because an unauthenticated endpoint is what a flood targets.
+  - **Idempotency (`docs/32` §5, AC2).** `(endpointId, providerEventId)` is unique, so a
+    provider retry is a **no-op that still acks** (stopping the retries). A provider that
+    sends no id still gets idempotency: the body digest is the fallback key.
+  - **Inbound payloads are untrusted input (`18`).** The signature proves origin and
+    integrity, never schema. The body is persisted unvalidated and only parsed as JSON at the
+    edge; a handler validates its own shape before acting.
+  - **Retention and failure (`32` §5).** The raw payload is retained for a bounded window and
+    nulled when it expires (the row is kept). An unprocessable event retries with bounded
+    backoff, then **dead-letters** with its raw payload retained for diagnosis; dead-letters
+    are visible (`/admin/integrations/inbound-dead-letters`) and explicitly retryable, and
+    the retry is audited. An event type with no registered handler is **accepted and marked
+    processed**, not failed — recording-only is a valid state.
+  - **Secrets (`32` §7).** The verification secret is generated server-side and returned
+    **once**; reads expose a `secretHint`; the audit snapshot records `secretRotated: true`,
+    never the secret.
+  - **Remaining (`32`):** inbound sync (`§6`), credential/config administration, the health
+    board (`GET /admin/integrations`), circuit-breaker/bulkhead tuning, and the integration
+    admin UI. M4 stays **partially** met (`40` §7).
+  - **Evidence.** `tests/inbound-webhooks.integration.test.ts` (7) passes alongside the full
+    backend suite.
+
+### 2026-10-08 — Phase 3 increment 18: Record history on all five types, audit export, and `32` approved with the outbound-webhook slice
+- **Type:** Feature / Docs
+- **Refs:** `31` §5/§9/§10/§11 (AC5), `32` §3/§4/§7/§8/§11/§12/§13/§15, `30` §3.4/§5,
+  `07` §3, `11` §9, `40` §7/§12
+- **Affects:** `docs/32-INTEGRATIONS.md` (**`Draft` → `Approved` 2026-10-08**), `07` §3,
+  `11` §9, `40` §7/§12, `43`; backend `prisma/schema.prisma` (migration
+  `20261008042654_add_outbound_webhooks`), `models/webhook.model.ts`,
+  `services/webhook.service.ts`, `services/webhook-scheduler.ts`, `services/audit.service.ts`,
+  `services/{asset,kb,task}.service.ts`, `services/audit-export.service.ts`,
+  `services/report-export.service.ts`, `services/audit-events.ts`,
+  `controllers/webhook.controller.ts`, `controllers/audit.controller.ts`,
+  `routes/webhook.routes.ts`, `routes/audit.routes.ts`, `routes/index.ts`, `server.ts`,
+  `validators/webhook.validators.ts`, `validators/audit.validators.ts`,
+  `helpers/permission-catalogue.ts`, `config/env.ts`, `integrations/index.ts`,
+  `integrations/webhook-client.ts`, `integrations/webhook-signature.ts`; frontend
+  `api/audit.api.ts`, `components/audit-export-panel.tsx`, `components/audit-explorer.tsx`,
+  `components/record-history-panel.tsx`, `pages/{my-tasks,asset-detail,article}.page.tsx`;
+  tests `tests/webhooks.integration.test.ts`, `tests/webhook-signature.test.ts`,
+  `tests/audit.integration.test.ts`, `tests/assets.integration.test.ts`,
+  `components/audit-export-panel.test.tsx`
+- **Notes:**
+  - **Record history completes on all five types (`31` §11).** `assertRecordReadable` now
+    resolves a participant's entitlement through the owning service for **request,
+    incident, task, asset and article** (`assertTaskVisible`/`assertAssetVisible`/
+    `assertArticleVisible` were added), so the record-history tab works everywhere the
+    specification lists it. A non-participant still receives the record's own `404`, never a
+    `403` that would disclose the record exists.
+  - **Audit export (`31` §9/§10) is a separate grant from reading.** `POST /audit/export`
+    queues an async job (`30` §3.4/§5) under `audit:export`, audited **with its filters**; a
+    `securityOnly` export additionally requires `audit:read.security` and is refused, not
+    widened. Scope is **re-derived when the worker runs**, so a queued export cannot outlive
+    a permission change. `GET /audit/exports/{id}` and `…/download` are self-scoped
+    (`404` for another user's job). The CSV marks its scope and, per row, whether the
+    security class was included or redacted.
+  - **`32` (Integrations) reached `Approved` on 2026-10-08** on owner authority, satisfying
+    the Phase 3 entry gate (`40` §12).
+  - **First integration slice: outbound webhooks (`32` §4).** A domain-owned
+    `WebhookHttpClient` interface with an HTTP adapter (`webhook-client.ts`) and a recording
+    fake for tests; per-subscription **HMAC-SHA256 signatures over the raw body with a
+    timestamp** (`webhook-signature.ts`, header `t=…,v1=…`, constant-time verification with a
+    tolerance window); subscription management (`/admin/webhooks`, secret returned **once**),
+    **fan-out read from the durable outbox** through a per-tenant cursor, and a delivery
+    worker with **bounded exponential backoff and full jitter → dead-letter**, plus a
+    dead-letter viewer and an audited explicit retry (`/admin/integrations/dead-letters`).
+    The payload is **minimal** — `id`, `type`, `occurredAt` and identifier fields only —
+    because a webhook is an exfiltration surface (`32` §4/§10). No external call ever runs
+    on the request path (`32` §1); a subscriber failure cannot reach authentication or
+    request handling (`32` §15 AC6).
+  - **Secrets never appear where they must not (`32` §7/§15 AC5).** The signing secret is
+    returned only on create; reads expose a `secretHint`; the audit `after` snapshot records
+    `secretRotated: true` rather than the secret; and the adapter maps vendor errors to a
+    domain reason without echoing a response body.
+  - **New grants (`07` §3):** `integration:manage`, `integration:read`, `integration:retry`
+    (Administrator).
+  - **Remaining (`32`):** inbound webhooks (§5) and inbound sync (§6), credential/config
+    administration (`admin:config` surface), the health board (`GET /admin/integrations`),
+    circuit-breaker/bulkhead tuning, and the integration admin UI. M4 is therefore
+    **partially** met (`40` §7).
+  - **Evidence.** `tests/webhooks.integration.test.ts` (7), `tests/webhook-signature.test.ts`
+    (5) pass alongside the full backend suite.
+
+### 2026-10-07 — Phase 3 increment 17: Audit log read surface and the audit explorer (F-17)
+- **Type:** Feature / Docs
+- **Refs:** `31` §2/§5/§9/§10/§11/§13 (AC5), `11` §9, `07` §3
+- **Affects:** `models/audit.model.ts`, `models/team.model.ts`, `services/audit.service.ts`,
+  `services/audit-events.ts`, `controllers/audit.controller.ts`, `routes/audit.routes.ts`,
+  `validators/audit.validators.ts`, `routes/index.ts`, `services/index.ts`; frontend
+  `api/audit.api.ts`, `components/audit-diff.tsx`, `components/audit-table.tsx`,
+  `components/audit-explorer.tsx`, `components/record-history-panel.tsx`,
+  `utils/short-id.ts`, `pages/audit.page.tsx`, `pages/security-activity.page.tsx`,
+  `pages/request-detail.page.tsx`, `pages/incident-detail.page.tsx`, `routes/index.tsx`,
+  `components/app-shell.tsx`; tests `tests/audit.integration.test.ts`,
+  `components/audit-diff.test.tsx`, `components/record-history-panel.test.tsx`,
+  `pages/audit.page.test.tsx`, `pages/security-activity.page.test.tsx`
+- **Notes:**
+  - **Scope is a query predicate, never a post-fetch filter (`31` §5).** `audit:read.all`
+    is the tenant; `audit:read.team` resolves to the caller's **team members** (plus
+    themselves), applied in `listAuditPage`. An `actorId` outside that scope returns an
+    **empty page**, so a lead cannot use the filter as an existence oracle for another
+    team's activity.
+  - **The security class is withheld, not flagged (`31` §2/§5).** Without
+    `audit:read.security` a security-class entry arrives with `redacted: true` and its
+    `before`/`after`/`sourceIp`/`userAgent` **already null** — the projection happens before
+    the row leaves the service. `securityOnly` and `/audit/security` are refused (`403`)
+    for a caller without the grant rather than returned empty.
+  - **Reading the log is itself audited (`31` §13 AC5).** Every page records an `audit.read`
+    entry (entity `AuditLog`, with the filters and the resolved scope) **in its own
+    transaction before the rows are returned**, so a caller cannot receive a page they were
+    not recorded as having seen.
+  - **A record's history is authorised by the record (`31` §5).**
+    `GET /audit/records/{entityType}/{entityId}` carries **no route-level audit guard**: a
+    participant reaches it through the owning service's object-level check
+    (`assertRequestVisible`/`assertIncidentVisible`), and only an audit grant widens it to
+    any record. A record type with no participant-readable projection stays auditor-only.
+    This also fixes the route guard that would have excluded every participant the
+    specification means to include.
+  - **One capability, two grants.** `listAuditEntries` asserts **either** `audit:read.team`
+    or `audit:read.all`; asserting the narrower one alone locked an administrator out of the
+    log they are entitled to read.
+  - **A closed, indexed filter set (`09` §3).** `action`, `actorId`, `(entityType,
+    entityId)` and `occurredAt` map to indexed columns; the cursor is the total
+    `(occurredAt, id)` tuple. No mutation route exists on this surface (`31` §9) — the
+    append-only trigger is the enforcement.
+  - **UI (`31` §11).** All four surfaces: a **record history** timeline on requests and
+    incidents, an **audit explorer** (filterable, cursor-paginated, field-level diff), a
+    **security activity** view, and a **diff viewer** with redaction markers. Each renders
+    what the server returned and applies no scope of its own; a withheld entry shows a
+    **Redacted** marker rather than an empty diff.
+  - **Remaining (`31` §11).** The record-history tab is wired on **requests and incidents**
+    only; tasks, assets and articles follow once each has a participant-readable history
+    projection (the record half of §5 currently resolves request and incident visibility).
+  - **Evidence.** `tests/audit.integration.test.ts` (7) — **244 tests / 26 files pass** in
+    the backend, 52 tests / 19 files in the frontend.
+
+### 2026-10-07 — Phase 3 increment 16: Knowledge base and asset register live; CR-0003/CR-0004 resolved
+- **Type:** Feature / Fix / Docs
+- **Refs:** `27` (Approved), `28` (Approved), `30` §2.1/§2.2, `09` §2/§3, `11` §9,
+  `42` §4.5 (`CR-0003`), §4.6 (`CR-0004`), `25` §4/§14, `07` §3
+- **Affects:** `27`, `28` (Draft → **Approved**, permission tables reconciled to `07` §3),
+  `25` §4, `09`, `11`, `42` §4.5/§4.6/§6, `helpers/permission-catalogue.ts`,
+  `services/sla-clock.service.ts`, `helpers/calendar.ts`, `models/kb.model.ts`,
+  `services/kb.service.ts`, `models/asset.model.ts`, `services/asset.service.ts`,
+  `services/search.service.ts`, `models/search.model.ts`, controllers, routes, validators,
+  migrations `20261007044147_knowledge_base_and_assets`, `20261007045627_article_draft_changes`,
+  `20261007051500_assets_search_idx`; frontend `components/markdown.tsx`, `api/kb.api.ts`,
+  `api/assets.api.ts`, four pages and their tests; tests `tests/kb.integration.test.ts`,
+  `tests/assets.integration.test.ts`
+- **Notes:**
+  - **`CR-0003` Accepted** by the owner: the inline v1 report-export storage stands for the
+    remainder of Phase 2; the object-storage migration (`ADR-0004`) is scheduled with the S3
+    adapter in Phase 3. No code change.
+  - **`CR-0004` Accepted and implemented.** `25` §4 example 2 now states **Wed 15:00**
+    (its own inputs and reasoning implied it), and `resumeClock` advances a frozen target by
+    the **working minutes inside the pause** rather than its wall-clock length — the AC2
+    rule it was violating. A 24×7 calendar still excludes the full pause, so Model B is
+    unchanged. Two explicit-timestamp regression tests were added.
+  - **Knowledge base (`27`).** Lifecycle `DRAFT → IN_REVIEW → PUBLISHED → ARCHIVED` with
+    reject and unarchive, and **publish creates an immutable `ArticleVersion`**. A published
+    article is served to readers from that snapshot, so an unreviewed edit cannot leak
+    (`AC2`) — `Article.draftChangedAt` is the pending-changes marker. Visibility is a SQL
+    **pre-filter on read *and* in search** (rule K3), so a `RESTRICTED` article is absent
+    from another reader's results rather than filtered out of them.
+  - **Asset register (`28`).** Types with a required-attribute schema, a server-allocated
+    `AST-000123` tag, and assignment intervals that are **history and never deleted**. Two
+    constraints live in the database because the schema language cannot express them: the
+    partial unique index that permits at most one **open** assignment (`AM1`) and the
+    `CHECK` that a holder's type agrees with its column. `state` and the open assignment are
+    written in one transaction (`AM6`), so no API path can make them disagree.
+  - **Search (`30` §2.1).** Articles and assets joined the FTS sources, each with its own
+    GIN expression index and the caller's scope applied as a SQL predicate (S1). Articles
+    weight `title`/`summary` above `body`; assets index `tag`, `serialNumber` and `name`.
+  - **Permission consistency.** `REQUESTER` was missing `asset:read.own`, which `07` §3
+    grants (`Asset read = O (own)`); the catalogue now matches the Approved matrix.
+  - **Evidence.** `tests/kb.integration.test.ts` (9) and `tests/assets.integration.test.ts`
+    (12) — **237 tests / 25 files pass** in the backend, 39 tests / 14 files in the
+    frontend.
+
 ### 2026-10-06 — Phase 2 increment 15: Security test suite, E2E journeys and SLA worked examples (Gate 2 evidence)
 - **Type:** Process / Test
 - **Refs:** `20` §3–§9, `37` §7/§14, `25` §4/§14, `42` §4.6 (`CR-0004`), `07` §1/§5, `17`

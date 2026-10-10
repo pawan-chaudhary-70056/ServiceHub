@@ -1,6 +1,6 @@
 # 27 — Knowledge Base
 
-**Status:** Draft · **Owner:** Product Lead · **Reviewer:** Backend Lead
+**Status:** Approved · **Owner:** Product Lead · **Reviewer:** Backend Lead · **Approved:** 2026-10-07
 **Consolidates:** old 60
 
 > **Scope:** authoring, publishing and consuming knowledge content. **Search ranking
@@ -92,13 +92,17 @@ savings inflates the figure; a KB-linked resolution that reopens was not a resol
 
 ## 7. Permissions
 
+Permission keys are the canonical ones from `07` §3 (the permission catalogue is owned
+by `07`; this document does not mint new keys).
+
 | Action | Permission |
 |---|---|
-| Read `PUBLIC` | `kb:read` (all authenticated) |
-| Read `INTERNAL` / `RESTRICTED` | `kb:read.internal` / explicit visibility grant |
-| Author / edit | `kb:author` |
-| Publish | `kb:publish` (lead/admin) |
-| Archive | `kb:manage` |
+| Read `PUBLIC` | `kb:article:read` (all authenticated roles hold it) |
+| Read `INTERNAL` / `RESTRICTED` | `kb:article:author` / `kb:article:publish`, or the article's explicit visibility grant — enforced server-side on read **and** in search (`K3`) |
+| Author / edit | `kb:article:author` |
+| Publish | `kb:article:publish` (lead/admin); the reviewer must differ from the author (`K1`) |
+| Archive | `kb:article:publish`; deletion is prohibited, archiving is the end state (`K7`) |
+| Manage categories | `admin:config` |
 
 ## 8. API
 

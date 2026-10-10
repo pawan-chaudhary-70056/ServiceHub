@@ -1,5 +1,8 @@
 import argon2 from 'argon2';
 import { ActorType, PrismaClient, UserStatus } from '@prisma/client';
+// Load a local `backend/.env` (when present) so the command reads DATABASE_URL the way
+// `npx prisma migrate` does. An injected environment always wins (`config/load-env.ts`).
+import '../src/config/load-env';
 import { PLATFORM_ROLE_KEY } from '../src/helpers/permission-catalogue';
 
 /**

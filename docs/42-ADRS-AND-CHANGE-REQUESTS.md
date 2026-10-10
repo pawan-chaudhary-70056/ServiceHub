@@ -403,10 +403,26 @@ requires a **time-limited** link, so the result must persist until it expires.
 v1 and schedules the storage migration with the S3 adapter; rejecting requires the adapter
 in the same change.
 
+**Resolution (2026-10-07).** **Accepted** by the Tech Lead: the inline v1 stands for the
+remainder of Phase 2, and the object-storage migration (`ADR-0004`) is scheduled with the
+S3 adapter in Phase 3 (`05` §5 build order 8). `19` gains the export storage-key path at
+that point; no further code change is required now. The row bound and the
+`REPORT_EXPORT_TTL_MINUTES` expiry documented in `30` §5 are the compensating control
+while the content is inline.
+
 **Implementation.** `backend/prisma/schema.prisma` (`ReportExport`),
 `models/report-export.model.ts`, `services/report-export.service.ts`,
 `services/report-export-scheduler.ts`, `controllers/search.controller.ts`,
 `routes/search.routes.ts`; tests `backend/tests/report-export.integration.test.ts`.
+
+**Superseded (2026-10-11, `43` increment 29).** The scheduled migration landed: report and
+`audit` exports now render to **object storage** (`ADR-0004`, `19` §7.1) and the row keeps only
+`ReportExport.storageKey`. The `content` column was dropped in migration
+`20261010194724_report_export_object_storage`, and downloads follow `19` §7.3 — a short-lived
+signed URL when the driver issues one (`s3`), a streamed response otherwise (`local`), sharing
+one code path with attachments. The compensating control recorded above (the row bound and
+`REPORT_EXPORT_TTL_MINUTES`) is no longer load-bearing for database size, but the TTL is
+unchanged: the link is still time-limited (`30` §5).
 
 ### 4.6 CR-0004 — SLA pause arithmetic across non-working time
 
@@ -455,6 +471,23 @@ for a cross-day pause, so the finding is visible rather than frozen into a green
 **Decision & approvers.** Pending the Tech Lead's decision. Approving updates `25` §4 and
 schedules the `resumeClock` fix as its own change with a regression test.
 
+**Resolution (2026-10-07).** **Accepted and implemented** by the Tech Lead, both defects
+in one change:
+
+1. `25` §4 example 2 now states **Wed 15:00**, which its own inputs and reasoning imply.
+2. `resumeClock` (`services/sla-clock.service.ts`) now advances the frozen target by the
+   **working minutes inside the pause**, not its wall-clock length. It loads the clock's
+   own policy calendar and uses the new `workingMinutesBetween` helper
+   (`helpers/calendar.ts`); a 24×7 calendar still excludes the full wall-clock pause, so
+   Model B is unchanged. `totalPausedSeconds` likewise accumulates the excluded *working*
+   minutes, which keeps `25` §9's "recomputable from stored timestamps" rule consistent.
+
+**Evidence.** `tests/sla-worked-examples.test.ts` adds two explicit-timestamp regression
+tests: an overnight pause (21 wall hours → 5 working hours excluded, target Thu 15:00
+instead of the buggy Mon 15:00) and a `WALL_CLOCK` pause (the full 21 hours excluded).
+`tests/sla-sweep.integration.test.ts` asserts the AC2 bound that survives any test-time
+wall clock (the shift never exceeds the pause and never moves the target backwards).
+
 ## 5. Traceability
 
 Every decision and change is traceable in both directions:
@@ -483,8 +516,8 @@ produced it.
 | ADR-0012 | ADR | Platform tenancy root, bootstrap and onboarding (D-9) | Accepted | Tech Lead |
 | CR-0001 | CR | Consolidate 106 documents into 44 with named ownership | Implemented | Tech Lead |
 | CR-0002 | CR | Interim search implementation (v1) — PostgreSQL FTS deferred | Withdrawn | Tech Lead |
-| CR-0003 | CR | Report export content stored inline (v1) rather than in object storage | Raised | Tech Lead |
-| CR-0004 | CR | SLA pause arithmetic across non-working time (doc example 2 + `resumeClock`) | Raised | Tech Lead |
+| CR-0003 | CR | Report export content stored inline (v1) rather than in object storage | Superseded 2026-10-11 (`43` incr. 29) | Tech Lead |
+| CR-0004 | CR | SLA pause arithmetic across non-working time (doc example 2 + `resumeClock`) | Implemented | Tech Lead |
 
 `CR-0001` is the documentation restructuring performed before this register existed; it
 is recorded retroactively per AD4-style discipline, and its effect is the current

@@ -36,8 +36,11 @@ the task rows (migrations `20261006062745_tasks` and
 `20261006063100_task_blocked_reason_check`), and the approval rows (migrations
 `20261006064000_approvals` and `20261006065000_approval_decision_insert_only`), the
 notification rows (migrations `20261006074517_notifications` and
-`20261006083900_notification_preferences_inapp`), and the search full-text indexes
-(migration `20261006082530_search_fts`).
+`20261006083900_notification_preferences_inapp`), the search full-text indexes
+(migration `20261006082530_search_fts`), and the knowledge-base and asset rows
+(migration `20261007044147_knowledge_base_and_assets`, plus the asset search index in
+`20261007051500_assets_search_idx`) and the article pending-changes column
+(`20261007045627_article_draft_changes`).
 
 | Entity | Constraint | Type |
 |---|---|---|
@@ -92,6 +95,17 @@ notification rows (migrations `20261006074517_notifications` and
 | `Notification` | `status` ∈ allowed set | Enum type |
 | `Notification` | delivery records for a tenant / by status | Indexes `(organizationId, status)`, `(status, createdAt)`, `(userId, channel, readAt, createdAt)` |
 | `NotificationPreference` | `(userId, eventType, channel)` unique | Unique index (`29` §7); a TRANSACTIONAL event is refused a disabling row by the service (`29` N6) |
+| `ArticleCategory` | `(organizationId, parentId, name)` unique | Unique index (`27` §3) |
+| `Article` | `(organizationId, slug)` unique | Unique index; a slug change writes an `ArticleSlugRedirect` first (`27` AC5) |
+| `Article` | deletion prohibited | No delete path; archiving is the end state (`27` K7) |
+| `ArticleSlugRedirect` | `(organizationId, fromSlug)` unique | Unique index |
+| `ArticleVersion` | `(articleId, version)` unique; immutable | Unique index; no update path (`27` §4) |
+| `KnowledgeLink` | `(organizationId, articleId, entityType, entityId)` unique | Unique index; the row stores the **version** linked (`27` K6) |
+| `AssetType` | `(organizationId, key)` unique | Unique index (`28` §2) |
+| `Asset` | `(organizationId, tag)` unique; `(organizationId, serialNumber)` unique when present | Unique indexes (`28` AM2); `tag` is allocated by an atomic counter (`22` §4) |
+| `Asset` | deletion prohibited | No delete path; retirement is the end state (`28` AM5) |
+| `AssetAssignment` | at most one **open** interval per asset | Partial unique index `... WHERE returned_at IS NULL` (`28` AM1) |
+| `AssetAssignment` | `holder_type` agrees with the holder column | `CHECK` constraint (`28` §3) |
 
 **Case-insensitive uniqueness is a write-path invariant.** A functional unique index
 (`lower(email)`) is not expressible in Prisma, so the normalised value is stored
@@ -168,6 +182,21 @@ constraint is what guarantees it under concurrency.
 | Q60 | Queued report exports for the worker | `report_exports(status, createdAt)` (claim is a conditional `UPDATE … WHERE status = 'QUEUED'`) |
 | Q61 | A requester's export jobs | `report_exports(requestedById, status)` |
 | Q62 | An organization's export jobs (support/quota) | `report_exports(organizationId, status)` |
+| Q63 | Published articles a reader may see, newest first | `articles(organizationId, status, updatedAt)` + `articles(organizationId, visibility, status)` (`27` §10) |
+| Q64 | Articles in a category | `articles(organizationId, categoryId)` |
+| Q65 | A retired slug resolves to its article | `article_slug_redirects(organizationId, fromSlug)` unique (`27` AC5) |
+| Q66 | The published snapshot for a version | `article_versions(articleId, version)` unique (`27` §4) |
+| Q67 | Links shown on a record | `knowledge_links(organizationId, entityType, entityId)` (`27` §8) |
+| Q68 | The register filtered by state, type or holder | `assets(organizationId, state, createdAt)`, `assets(organizationId, assetTypeId)`, `assets(organizationId, assignedToUserId)`, `assets(organizationId, assignedToTeamId)` (`28` §8) |
+| Q69 | An assignment interval history | `asset_assignments(organizationId, assetId, assignedAt)` (`28` §8) |
+| Q70 | Records matching a term, including knowledge and assets | GIN expression indexes on `articles` and `assets` (migrations `20261007044147_knowledge_base_and_assets`, `20261007051500_assets_search_idx`); `30` §2.1 |
+
+**Two of the `27`/`28` constraints are not expressible in the schema language** and are
+added by raw SQL in their migration: the partial unique index
+`asset_assignments_one_open_per_asset` (at most one open assignment — a plain unique
+index would forbid history, `28` AM1) and the `CHECK`
+`asset_assignments_holder_exactly_one` (holder type agrees with the holder column,
+`28` §3).
 
 The tenant list (`GET /platform/organizations`) orders by `createdAt DESC, id DESC` on
 a **deliberately small** table and is served by a sequential scan; an index is added only

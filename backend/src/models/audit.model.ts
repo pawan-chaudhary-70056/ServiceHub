@@ -1,4 +1,5 @@
 import { Prisma, type ActorType, type AuditLog } from '@prisma/client';
+import { decodeCursor } from '../utils/pagination';
 import { prisma, type DataClient } from './db';
 
 /**
@@ -62,6 +63,75 @@ export function listAuditForEntity(
     },
     orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
     take: params.limit,
+  });
+}
+
+/**
+ * The audit explorer's query (`docs/31` §10).
+ *
+ * Every filter maps to an indexed column or is rejected (`docs/09` §3): `action`,
+ * `actorId`, `(entityType, entityId)` and `occurredAt` are all indexed, and the ordering
+ * uses the same tuple as the per-entity projection so the cursor is total.
+ *
+ * The caller's scope is applied **here, as a predicate** — never by fetching and then
+ * filtering, which for an audit log means the leak is already in the page size and the
+ * ranking.
+ */
+export interface AuditQueryParams {
+  organizationId: string;
+  /** Narrow to these actor ids (the team scope resolves to the caller's team members). */
+  actorIds?: string[];
+  actions?: string[];
+  /** Restrict to the security class by action prefix (`docs/31` §5). */
+  securityActionPrefixes?: string[];
+  actorId?: string;
+  entityType?: string;
+  entityId?: string;
+  from?: Date;
+  to?: Date;
+  limit: number;
+  cursor?: string;
+}
+
+export function listAuditPage(
+  params: AuditQueryParams,
+  client: DataClient = prisma,
+): Promise<AuditLog[]> {
+  const where: Prisma.AuditLogWhereInput = { organizationId: params.organizationId };
+
+  if (params.actorIds) {
+    // An empty list means "no scope", which must match nothing rather than everything.
+    where.actorId = { in: params.actorIds };
+  }
+  if (params.actions && params.actions.length > 0) where.action = { in: params.actions };
+  if (params.securityActionPrefixes && params.securityActionPrefixes.length > 0) {
+    where.AND = [
+      { OR: params.securityActionPrefixes.map((prefix) => ({ action: { startsWith: prefix } })) },
+    ];
+  }
+  if (params.actorId) where.actorId = params.actorId;
+  if (params.entityType) where.entityType = params.entityType;
+  if (params.entityId) where.entityId = params.entityId;
+  if (params.from || params.to) {
+    where.occurredAt = {
+      ...(params.from ? { gte: params.from } : {}),
+      ...(params.to ? { lte: params.to } : {}),
+    };
+  }
+
+  if (params.cursor) {
+    const decoded = decodeCursor(params.cursor);
+    const occurredAt = new Date(decoded.sortValue);
+    const cursorClause = {
+      OR: [{ occurredAt: { lt: occurredAt } }, { occurredAt, id: { lt: decoded.id } }],
+    };
+    where.AND = [...(Array.isArray(where.AND) ? where.AND : []), cursorClause];
+  }
+
+  return client.auditLog.findMany({
+    where,
+    orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+    take: params.limit + 1,
   });
 }
 

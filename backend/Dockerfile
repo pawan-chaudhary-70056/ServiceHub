@@ -53,3 +53,15 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
 USER servicehub
 EXPOSE 4000
 CMD ["node", "dist/server.js"]
+
+# ---------- worker (production) ----------
+# The asynchronous tier as its own workload (`docs/03` §3/§6, `docs/34` §4): the schedulers and
+# no HTTP listener. The image is identical; only the process differs.
+#   - `HEALTHCHECK NONE` because the inherited probe checks `/health/live`, and a worker serves
+#     no HTTP by design — an inherited probe would report a healthy worker as dead forever.
+#   - `PROCESS_ROLE=worker` is the belt; the entrypoint refusing any role that serves HTTP is
+#     the braces, so a misconfigured deployment fails at boot instead of double-scheduling.
+FROM production AS worker
+HEALTHCHECK NONE
+ENV PROCESS_ROLE=worker
+CMD ["node", "dist/worker.js"]

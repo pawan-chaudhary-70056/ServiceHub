@@ -8,7 +8,8 @@ import { apiDownload, apiRequest, type DownloadedFile } from './client';
  * adds no filtering of its own, so it can never appear to widen what the server allows.
  */
 
-export type SearchEntityType = 'REQUEST' | 'INCIDENT' | 'CATALOG_ITEM' | 'USER';
+export type SearchEntityType =
+  'REQUEST' | 'INCIDENT' | 'CATALOG_ITEM' | 'USER' | 'ARTICLE' | 'ASSET';
 
 export interface SearchResultItem {
   entityType: SearchEntityType;

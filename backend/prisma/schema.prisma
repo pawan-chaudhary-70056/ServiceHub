@@ -88,6 +88,14 @@ enum CommentVisibility {
   INTERNAL
 }
 
+/// Upload lifecycle (docs/19 §7.2). A file is not retrievable until it clears the scan
+/// step, and a quarantined file is never served, even by a direct URL (docs/19 §8).
+enum AttachmentStatus {
+  PENDING
+  AVAILABLE
+  QUARANTINED
+}
+
 /// Incident impact (docs/23 §3). Paired with urgency to derive priority.
 enum IncidentImpact {
   EXTENSIVE
@@ -142,6 +150,7 @@ model Organization {
   slaClocks          SlaClock[]
   serviceRequests    ServiceRequest[]
   comments           Comment[]
+  attachments        Attachment[]
   referenceSequences ReferenceSequence[]
   incidents          Incident[]
   tasks              Task[]
@@ -150,6 +159,24 @@ model Organization {
   approvalDecisions  ApprovalDecision[]
   notifications      Notification[]
   reportExports      ReportExport[]
+
+  articleCategories    ArticleCategory[]
+  articles             Article[]
+  articleVersions      ArticleVersion[]
+  articleSlugRedirects ArticleSlugRedirect[]
+  knowledgeLinks       KnowledgeLink[]
+  assetTypes           AssetType[]
+  assets               Asset[]
+  assetAssignments     AssetAssignment[]
+
+  webhookSubscriptions    WebhookSubscription[]
+  webhookDeliveries       WebhookDelivery[]
+  webhookFanoutState      WebhookFanoutState?
+  inboundWebhookEndpoints InboundWebhookEndpoint[]
+  inboundWebhookEvents    InboundWebhookEvent[]
+  directorySyncState      DirectorySyncState?
+  directoryUserMappings   DirectoryUserMapping[]
+  integrationSettings     IntegrationSetting[]
 
   @@map("organizations")
 }
@@ -172,27 +199,38 @@ model User {
   createdAt      DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  organization            Organization?            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  credential              Credential?
-  sessions                Session[]
-  passwordResetTokens     PasswordResetToken[]
-  userRoles               UserRole[]
-  teamMemberships         TeamMember[]
-  invitationsSent         Invitation[]             @relation("InvitationInvitedBy")
-  invitationsAccepted     Invitation[]             @relation("InvitationAcceptedBy")
-  auditLogs               AuditLog[]
-  requestsRequested       ServiceRequest[]         @relation("RequestRequester")
-  requestsAssigned        ServiceRequest[]         @relation("RequestAssignee")
-  comments                Comment[]
-  incidentsReported       Incident[]               @relation("IncidentReporter")
-  incidentsAssigned       Incident[]               @relation("IncidentAssignee")
-  tasksAssigned           Task[]                   @relation("TaskAssignee")
-  tasksCreated            Task[]                   @relation("TaskCreator")
-  approvalAssignments     ApprovalStepApprover[]
-  approvalDecisions       ApprovalDecision[]
-  notifications           Notification[]
-  notificationPreferences NotificationPreference[]
-  reportExports           ReportExport[]
+  organization             Organization?            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  credential               Credential?
+  sessions                 Session[]
+  passwordResetTokens      PasswordResetToken[]
+  userRoles                UserRole[]
+  teamMemberships          TeamMember[]
+  invitationsSent          Invitation[]             @relation("InvitationInvitedBy")
+  invitationsAccepted      Invitation[]             @relation("InvitationAcceptedBy")
+  auditLogs                AuditLog[]
+  requestsRequested        ServiceRequest[]         @relation("RequestRequester")
+  requestsAssigned         ServiceRequest[]         @relation("RequestAssignee")
+  comments                 Comment[]
+  attachments              Attachment[]
+  incidentsReported        Incident[]               @relation("IncidentReporter")
+  incidentsAssigned        Incident[]               @relation("IncidentAssignee")
+  tasksAssigned            Task[]                   @relation("TaskAssignee")
+  tasksCreated             Task[]                   @relation("TaskCreator")
+  approvalAssignments      ApprovalStepApprover[]
+  approvalDecisions        ApprovalDecision[]
+  notifications            Notification[]
+  notificationPreferences  NotificationPreference[]
+  reportExports            ReportExport[]
+  articlesAuthored         Article[]                @relation("ArticleAuthor")
+  articlesReviewed         Article[]                @relation("ArticleReviewer")
+  articleVersionsPublished ArticleVersion[]         @relation("ArticleVersionPublisher")
+  knowledgeLinksCreated    KnowledgeLink[]          @relation("KnowledgeLinkCreator")
+  assetsHeld               Asset[]                  @relation("AssetHolder")
+  assetAssignmentsHeld     AssetAssignment[]        @relation("AssetAssignmentUser")
+  assetAssignmentsMade     AssetAssignment[]        @relation("AssetAssignmentActor")
+  webhookSubscriptions     WebhookSubscription[]    @relation("WebhookSubscriptionCreator")
+  inboundEndpointsCreated  InboundWebhookEndpoint[] @relation("InboundEndpointCreator")
+  directoryMappings        DirectoryUserMapping[]   @relation("DirectoryUserMapping")
 
   @@index([organizationId])
   @@map("users")
@@ -363,11 +401,13 @@ model Team {
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  members         TeamMember[]
-  catalogItems    CatalogItem[]
-  serviceRequests ServiceRequest[]
-  incidents       Incident[]
+  organization         Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  members              TeamMember[]
+  catalogItems         CatalogItem[]
+  serviceRequests      ServiceRequest[]
+  incidents            Incident[]
+  assetsHeld           Asset[]           @relation("AssetTeamHolder")
+  assetAssignmentsHeld AssetAssignment[] @relation("AssetAssignmentTeam")
 
   @@unique([organizationId, name])
   @@index([organizationId])
@@ -559,8 +599,9 @@ enum ReportExportStatus {
 }
 
 /// An async report export (`docs/30` §3.1: period/ad-hoc analysis runs as a job and
-/// produces a time-limited download). The content is stored inline for v1 (see `CR-0003`);
-/// the shape allows a storage key to replace it when the object store lands (`ADR-0004`).
+/// produces a time-limited download). The rendered CSV lives in object storage, not in a
+/// column (`ADR-0004`, `19` §7.1): `content` was the v1 interim (`CR-0003`) and is gone, so a
+/// backend never becomes the only place an export exists.
 model ReportExport {
   id             String             @id @default(uuid(7))
   organizationId String             @map("organization_id")
@@ -571,8 +612,10 @@ model ReportExport {
   format         String             @default("CSV")
   status         ReportExportStatus @default(QUEUED)
   rowCount       Int                @default(0) @map("row_count")
-  /// The rendered CSV. Inline in v1 (`CR-0003`).
-  content        String?
+  /// The object-storage key of the rendered CSV (`ADR-0004`, `19` §7.1). The bytes live in
+  /// storage, not in a column: a backend keeps no file bytes, so an export produced by one
+  /// instance is downloadable from another, and a database dump is not a data export.
+  storageKey     String?            @map("storage_key")
   error          String?
   expiresAt      DateTime?          @map("expires_at") @db.Timestamptz(6)
   createdAt      DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -886,6 +929,35 @@ model Comment {
   @@map("comments")
 }
 
+/// File metadata for any record, keyed on `(entityType, entityId)` — the shared
+/// child-table design of docs/08 §3. Bytes live in object storage (`ADR-0004`); only the
+/// server-generated, unguessable key is stored here, never the client filename as a path
+/// (docs/19 §7.2). Access always follows the parent (`docs/07` §4): this row grants no
+/// visibility of its own, and every download re-checks the parent (docs/19 §7.3).
+model Attachment {
+  id             String           @id @default(uuid(7))
+  organizationId String           @map("organization_id")
+  /// 'ServiceRequest' | 'Incident' | 'Article' (docs/08 §3).
+  entityType     String           @map("entity_type")
+  entityId       String           @map("entity_id")
+  uploaderId     String           @map("uploader_id")
+  /// Client filename, sanitised for display (docs/19 §7.2 rule 2).
+  filename       String
+  /// Server-generated, unguessable, never derived from the client filename.
+  storageKey     String           @unique @map("storage_key")
+  contentType    String           @map("content_type")
+  sizeBytes      Int              @map("size_bytes")
+  status         AttachmentStatus @default(PENDING)
+  quarantinedAt  DateTime?        @map("quarantined_at") @db.Timestamptz(6)
+  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  uploader     User         @relation(fields: [uploaderId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, entityType, entityId, createdAt])
+  @@map("attachments")
+}
+
 /// Atomic per-(tenant, type, period) counter for reference generation (docs/22 §4). A
 /// read-then-write `max()+1` is a race; an atomic increment on a unique row is not.
 model ReferenceSequence {
@@ -1142,4 +1214,493 @@ model ApprovalDecision {
   @@index([organizationId, workflowId, decidedAt])
   @@index([stepId, approverId])
   @@map("approval_decisions")
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge base (docs/27, F-15)
+// ---------------------------------------------------------------------------
+
+/// The article lifecycle (docs/27 §4): DRAFT → IN_REVIEW → PUBLISHED → ARCHIVED,
+/// with reject back to DRAFT and unarchive back to PUBLISHED.
+enum ArticleStatus {
+  DRAFT
+  IN_REVIEW
+  PUBLISHED
+  ARCHIVED
+}
+
+/// Who may read an article (docs/27 §2). Enforced server-side on read **and** in
+/// search (rule K3): a restricted article leaking through search is the classic KB
+/// defect, so visibility is a pre-filter, never a post-filter.
+enum ArticleVisibility {
+  PUBLIC
+  INTERNAL
+  RESTRICTED
+}
+
+/// Hierarchical grouping of knowledge articles (docs/27 §3), mirroring the catalog
+/// category rules of docs/21 §3.
+model ArticleCategory {
+  id             String   @id @default(uuid(7))
+  organizationId String   @map("organization_id")
+  parentId       String?  @map("parent_id")
+  name           String
+  description    String?
+  displayOrder   Int      @default(0) @map("display_order")
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  parent       ArticleCategory?  @relation("ArticleCategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children     ArticleCategory[] @relation("ArticleCategoryTree")
+  articles     Article[]
+
+  @@unique([organizationId, parentId, name])
+  @@index([organizationId, parentId])
+  @@map("article_categories")
+}
+
+/// A knowledge document with a stable identity and versioned content (docs/27 §2).
+/// Deletion is prohibited (rule K7) — an article is archived, and inbound links keep
+/// resolving to the version that was linked (rule K6).
+model Article {
+  id              String            @id @default(uuid(7))
+  organizationId  String            @map("organization_id")
+  categoryId      String?           @map("category_id")
+  title           String
+  /// Stable, unique per tenant. A change records an `ArticleSlugRedirect` so inbound
+  /// links do not 404 (docs/27 §12 AC5).
+  slug            String
+  summary         String?
+  body            String
+  status          ArticleStatus     @default(DRAFT)
+  visibility      ArticleVisibility @default(INTERNAL)
+  authorId        String            @map("author_id")
+  reviewerId      String?           @map("reviewer_id")
+  /// Increments on each publish; the published snapshot lives in `ArticleVersion`.
+  version         Int               @default(1)
+  publishedAt     DateTime?         @map("published_at") @db.Timestamptz(6)
+  reviewedAt      DateTime?         @map("reviewed_at") @db.Timestamptz(6)
+  /// Freshness review due (rule K5, default 12 months); overdue is flagged, never
+  /// auto-archived.
+  reviewDueAt     DateTime?         @map("review_due_at") @db.Timestamptz(6)
+  archivedAt      DateTime?         @map("archived_at") @db.Timestamptz(6)
+  /// Set when the working copy changes after a publish. Readers keep seeing the
+  /// published snapshot in `ArticleVersion` until republish (`docs/27` §4, §11 AC2).
+  draftChangedAt  DateTime?         @map("draft_changed_at") @db.Timestamptz(6)
+  viewCount       Int               @default(0) @map("view_count")
+  helpfulCount    Int               @default(0) @map("helpful_count")
+  notHelpfulCount Int               @default(0) @map("not_helpful_count")
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization  Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category      ArticleCategory?      @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  author        User                  @relation("ArticleAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  reviewer      User?                 @relation("ArticleReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+  versions      ArticleVersion[]
+  links         KnowledgeLink[]
+  slugRedirects ArticleSlugRedirect[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, status, updatedAt])
+  @@index([organizationId, visibility, status])
+  @@index([organizationId, categoryId])
+  @@map("articles")
+}
+
+/// An immutable published snapshot (docs/27 §4). Editing a published article produces
+/// a new draft; the previously published version stays addressable until republish, so a
+/// link from a resolved incident resolves to what the resolver actually read (rule K6).
+model ArticleVersion {
+  id             String            @id @default(uuid(7))
+  organizationId String            @map("organization_id")
+  articleId      String            @map("article_id")
+  version        Int
+  title          String
+  summary        String?
+  body           String
+  visibility     ArticleVisibility
+  publishedAt    DateTime          @map("published_at") @db.Timestamptz(6)
+  publishedById  String            @map("published_by_id")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  article      Article      @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  publishedBy  User         @relation("ArticleVersionPublisher", fields: [publishedById], references: [id], onDelete: Restrict)
+
+  @@unique([articleId, version])
+  @@map("article_versions")
+}
+
+/// A redirect from a retired slug to its article (docs/27 §12 AC5).
+model ArticleSlugRedirect {
+  id             String   @id @default(uuid(7))
+  organizationId String   @map("organization_id")
+  articleId      String   @map("article_id")
+  fromSlug       String   @map("from_slug")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  article      Article      @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, fromSlug])
+  @@map("article_slug_redirects")
+}
+
+/// An association between an article — at the version linked — and a request or
+/// incident (docs/27 §5 K6). The version is stored so the record shows what was applied.
+model KnowledgeLink {
+  id             String   @id @default(uuid(7))
+  organizationId String   @map("organization_id")
+  articleId      String   @map("article_id")
+  articleVersion Int      @map("article_version")
+  entityType     String   @map("entity_type")
+  entityId       String   @map("entity_id")
+  linkedById     String   @map("linked_by_id")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  article      Article      @relation(fields: [articleId], references: [id], onDelete: Restrict)
+  linkedBy     User         @relation("KnowledgeLinkCreator", fields: [linkedById], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, articleId, entityType, entityId])
+  @@index([organizationId, entityType, entityId])
+  @@map("knowledge_links")
+}
+
+// ---------------------------------------------------------------------------
+// Asset management (docs/28, F-16)
+// ---------------------------------------------------------------------------
+
+/// Asset lifecycle (docs/28 §4). Retirement is a state change, never a delete (rule AM5).
+enum AssetState {
+  PROCURED
+  IN_STOCK
+  ASSIGNED
+  IN_REPAIR
+  RETIRED
+  DISPOSED
+}
+
+/// Who holds an asset (docs/28 §3).
+enum AssetHolderType {
+  USER
+  TEAM
+}
+
+/// An administrator-defined class of asset with its own attribute schema (docs/28 §2).
+model AssetType {
+  id              String   @id @default(uuid(7))
+  organizationId  String   @map("organization_id")
+  key             String
+  name            String
+  description     String?
+  /// JSON schema for the type-specific `attributes` (rule AM7). `{ required: [...] }`.
+  attributeSchema Json     @default("{}") @map("attribute_schema")
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  assets       Asset[]
+
+  @@unique([organizationId, key])
+  @@index([organizationId])
+  @@map("asset_types")
+}
+
+/// A tracked configuration item (docs/28 §2). `assignedTo*` is denormalised from the
+/// open assignment (rule AM6): state and history must never disagree.
+model Asset {
+  id                String     @id @default(uuid(7))
+  organizationId    String     @map("organization_id")
+  assetTypeId       String     @map("asset_type_id")
+  /// Unique human-readable identifier per tenant (`AST-000123`), allocated atomically.
+  tag               String
+  serialNumber      String?    @map("serial_number")
+  name              String
+  description       String?
+  state             AssetState @default(PROCURED)
+  attributes        Json       @default("{}")
+  assignedToUserId  String?    @map("assigned_to_user_id")
+  assignedToTeamId  String?    @map("assigned_to_team_id")
+  purchaseDate      DateTime?  @map("purchase_date") @db.Date
+  warrantyExpiresAt DateTime?  @map("warranty_expires_at") @db.Date
+  retiredAt         DateTime?  @map("retired_at") @db.Timestamptz(6)
+  disposedAt        DateTime?  @map("disposed_at") @db.Timestamptz(6)
+  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  assetType      AssetType         @relation(fields: [assetTypeId], references: [id], onDelete: Restrict)
+  assignedToUser User?             @relation("AssetHolder", fields: [assignedToUserId], references: [id], onDelete: SetNull)
+  assignedToTeam Team?             @relation("AssetTeamHolder", fields: [assignedToTeamId], references: [id], onDelete: SetNull)
+  assignments    AssetAssignment[]
+
+  @@unique([organizationId, tag])
+  @@unique([organizationId, serialNumber])
+  @@index([organizationId, state, createdAt])
+  @@index([organizationId, assetTypeId])
+  @@index([organizationId, assignedToUserId])
+  @@index([organizationId, assignedToTeamId])
+  @@map("assets")
+}
+
+// ---------------------------------------------------------------------------
+// Integrations — outbound webhooks (docs/32 §4)
+// ---------------------------------------------------------------------------
+
+/// Delivery lifecycle for an outbound webhook (docs/32 §4, §8). A failed delivery is
+/// retried with bounded backoff and then **dead-lettered** with an alert; it is never
+/// dropped silently.
+enum WebhookDeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+  DEAD_LETTER
+}
+
+/// A per-event, per-endpoint webhook subscription (docs/32 §4). The `secret` is a
+/// credential: it is used to sign the raw body, is never returned by the API, and never
+/// appears in a log, an audit payload or an error message (docs/32 §7).
+model WebhookSubscription {
+  id             String   @id @default(uuid(7))
+  organizationId String   @map("organization_id")
+  description    String
+  url            String
+  /// HMAC-SHA256 signing secret. Treated as a secret end to end (docs/32 §7).
+  secret         String
+  /// The event types this endpoint receives (docs/32 §2 outbound webhook).
+  events         String[]
+  enabled        Boolean  @default(true)
+  createdById    String   @map("created_by_id")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User              @relation("WebhookSubscriptionCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  deliveries   WebhookDelivery[]
+
+  @@index([organizationId, enabled])
+  @@map("webhook_subscriptions")
+}
+
+/// One attempt to deliver one event to one subscription (docs/32 §4). The payload is
+/// **minimal** — ids, action, timestamp — never the full record (docs/32 §4), so a
+/// subscriber cannot receive data it should not hold. `eventId` is unique per
+/// subscription, so a redriven event cannot produce a second delivery.
+model WebhookDelivery {
+  id             String                @id @default(uuid(7))
+  organizationId String                @map("organization_id")
+  subscriptionId String                @map("subscription_id")
+  /// The durable source event, stable across attempts; receivers dedupe on it (§4).
+  eventId        String                @map("event_id")
+  eventType      String                @map("event_type")
+  payload        Json
+  status         WebhookDeliveryStatus @default(PENDING)
+  attempts       Int                   @default(0)
+  responseStatus Int?                  @map("response_status")
+  /// A domain-level reason, safe to show; never the vendor response body (docs/32 §3).
+  lastError      String?               @map("last_error")
+  lastAttemptAt  DateTime?             @map("last_attempt_at") @db.Timestamptz(6)
+  nextAttemptAt  DateTime?             @map("next_attempt_at") @db.Timestamptz(6)
+  deliveredAt    DateTime?             @map("delivered_at") @db.Timestamptz(6)
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  subscription WebhookSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@unique([subscriptionId, eventId])
+  @@index([status, nextAttemptAt])
+  @@index([organizationId, status, createdAt])
+  @@map("webhook_deliveries")
+}
+
+/// Processing lifecycle for a received inbound webhook (docs/32 §5). RECEIVED → PROCESSED,
+/// or → FAILED → (retry) / → DEAD_LETTER. The raw payload is retained until `expiresAt`.
+enum InboundWebhookStatus {
+  RECEIVED
+  PROCESSING
+  PROCESSED
+  FAILED
+  DEAD_LETTER
+}
+
+/// A registered inbound webhook endpoint (docs/32 §5). `key` is the `{provider}` path
+/// segment and the endpoint's identity; the `secret` verifies the signature. An endpoint may
+/// be attributed to a tenant (so its events land in that tenant) or be platform-level.
+model InboundWebhookEndpoint {
+  id             String   @id @default(uuid(7))
+  /// The `{provider}` path segment; globally unique so the URL resolves one endpoint.
+  key            String   @unique
+  provider       String
+  organizationId String?  @map("organization_id")
+  /// HMAC-SHA256 verification secret. A credential end to end (docs/32 §7).
+  secret         String
+  enabled        Boolean  @default(true)
+  createdById    String?  @map("created_by_id")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization?         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User?                 @relation("InboundEndpointCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  events       InboundWebhookEvent[]
+
+  @@index([organizationId, enabled])
+  @@map("inbound_webhook_endpoints")
+}
+
+/// One received inbound webhook (docs/32 §5). The raw payload is stored before acking so
+/// nothing is lost if processing is slow or fails, and `(endpointId, providerEventId)` is
+/// unique so a provider retry is a **no-op** rather than a duplicate side effect.
+model InboundWebhookEvent {
+  id              String               @id @default(uuid(7))
+  endpointId      String               @map("endpoint_id")
+  organizationId  String?              @map("organization_id")
+  /// The provider's own event id, used for idempotency.
+  providerEventId String               @map("provider_event_id")
+  eventType       String?              @map("event_type")
+  /// The received payload, unvalidated and untrusted until the worker validates it. Nulled
+  /// once `expiresAt` passes (retention, `docs/32` §5).
+  rawPayload      Json?                @map("raw_payload")
+  status          InboundWebhookStatus @default(RECEIVED)
+  attempts        Int                  @default(0)
+  lastError       String?              @map("last_error")
+  receivedAt      DateTime             @default(now()) @map("received_at") @db.Timestamptz(6)
+  processedAt     DateTime?            @map("processed_at") @db.Timestamptz(6)
+  lastAttemptAt   DateTime?            @map("last_attempt_at") @db.Timestamptz(6)
+  nextAttemptAt   DateTime?            @map("next_attempt_at") @db.Timestamptz(6)
+  /// Raw-payload retention (`docs/32` §5): the payload is not kept forever.
+  expiresAt       DateTime             @map("expires_at") @db.Timestamptz(6)
+
+  endpoint     InboundWebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  organization Organization?          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([endpointId, providerEventId])
+  @@index([status, nextAttemptAt])
+  @@index([organizationId, status, receivedAt])
+  @@map("inbound_webhook_events")
+}
+
+/// The outcome of a roster sync run (`docs/32` §6).
+
+enum RosterSyncStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+  ABORTED
+}
+
+/// Per-tenant roster sync state (`docs/32` §6). One row per organization: the outcome of the
+/// last run, the counts, and a resumable checkpoint.
+model DirectorySyncState {
+  id               String           @id @default(uuid(7))
+  organizationId   String           @unique @map("organization_id")
+  status           RosterSyncStatus @default(RUNNING)
+  lastRunAt        DateTime?        @map("last_run_at") @db.Timestamptz(6)
+  /// Resumable checkpoint: the last external id fully applied (`§6` volume rule).
+  lastCheckpoint   String?          @map("last_checkpoint")
+  usersSeen        Int              @default(0) @map("users_seen")
+  usersAdopted     Int              @default(0) @map("users_adopted")
+  usersCreated     Int              @default(0) @map("users_created")
+  usersUpdated     Int              @default(0) @map("users_updated")
+  usersDeactivated Int              @default(0) @map("users_deactivated")
+  lastError        String?          @map("last_error")
+  createdAt        DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("directory_sync_states")
+}
+
+/// The external-id ↔ internal-user mapping (`docs/32` §6). Identity is keyed on the source's
+/// immutable id, never on a mutable attribute like email; the mapping is retained when a user
+/// is deactivated, so a returning person is recognised rather than duplicated.
+model DirectoryUserMapping {
+  id             String   @id @default(uuid(7))
+  organizationId String   @map("organization_id")
+  externalId     String   @map("external_id")
+  userId         String   @map("user_id")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation("DirectoryUserMapping", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, externalId])
+  @@index([organizationId, userId])
+  @@map("directory_user_mappings")
+}
+
+/// Per-organization cursor over the transactional outbox (docs/32 §4). Webhook fan-out is
+/// a second reader of the same durable event stream the notifications drain consumes, so it
+/// tracks its own watermark rather than sharing `Outbox.processedAt` and coupling the two.
+model WebhookFanoutState {
+  organizationId String   @id @map("organization_id")
+  /// The last outbox id fanned out. Outbox ids are time-ordered (uuid v7), so a lexicographic
+  /// `>` is a correct watermark within an event stream.
+  lastEventId    String?  @map("last_event_id")
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("webhook_fanout_states")
+}
+
+/// A time-bounded link between an asset and a holder (docs/28 §3). Assignments are
+/// history and are never deleted (rule AM3); at most one may be open per asset, which a
+/// partial unique index enforces in the database (rule AM1, docs/09).
+model AssetAssignment {
+  id             String          @id @default(uuid(7))
+  organizationId String          @map("organization_id")
+  assetId        String          @map("asset_id")
+  holderType     AssetHolderType @map("holder_type")
+  userId         String?         @map("user_id")
+  teamId         String?         @map("team_id")
+  assignedAt     DateTime        @map("assigned_at") @db.Timestamptz(6)
+  returnedAt     DateTime?       @map("returned_at") @db.Timestamptz(6)
+  assignedById   String          @map("assigned_by_id")
+  notes          String?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  asset        Asset        @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  user         User?        @relation("AssetAssignmentUser", fields: [userId], references: [id], onDelete: Restrict)
+  team         Team?        @relation("AssetAssignmentTeam", fields: [teamId], references: [id], onDelete: Restrict)
+  assignedBy   User         @relation("AssetAssignmentActor", fields: [assignedById], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, assetId, assignedAt])
+  @@index([organizationId, userId])
+  @@map("asset_assignments")
+}
+
+/// Non-secret configuration for a named integration (docs/32 §7/§11/§12).
+///
+/// `credentialRef` is a **reference** — `env:NAME`, `vault:path#field` — never the secret
+/// itself: credentials are runtime-injected and never persisted (`17` §3, `35`), so the
+/// configuration surface records *where* a credential comes from and audits the change,
+/// while the value stays in the environment. `config` holds only reliability tuning
+/// (breaker/bulkhead/retry knobs) that a service validates against a per-key schema.
+model IntegrationSetting {
+  id             String    @id @default(uuid(7))
+  organizationId String    @map("organization_id")
+  /// Stable integration key: `email`, `directory`, `webhooks`, `inbound_webhooks` (`32` §2).
+  key            String
+  enabled        Boolean   @default(true)
+  config         Json      @default("{}")
+  credentialRef  String?   @map("credential_ref")
+  lastTestedAt   DateTime? @map("last_tested_at") @db.Timestamptz(6)
+  /// `OK` or `FAILED`; the reason is kept separately and is domain-level, never a vendor body.
+  lastTestStatus String?   @map("last_test_status")
+  lastTestError  String?   @map("last_test_error")
+  createdById    String?   @map("created_by_id")
+  updatedById    String?   @map("updated_by_id")
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, key])
+  @@map("integration_settings")
 }

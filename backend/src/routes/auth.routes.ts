@@ -1,7 +1,9 @@
 import { Router } from 'express';
 import { config } from '../config';
 import {
+  deleteSession,
   getMe,
+  getSessions,
   postAcceptInvitation,
   postForgotPassword,
   postLogin,
@@ -18,6 +20,7 @@ import {
   loginSchema,
   resetPasswordSchema,
 } from '../validators/auth.validators';
+import { idParamsSchema } from '../validators';
 
 /**
  * Authentication routes (docs/11 §9, docs/06).
@@ -64,3 +67,14 @@ authRouter.post(
 
 authRouter.post('/logout', authenticate, csrfProtection, postLogout);
 authRouter.get('/me', authenticate, getMe);
+
+// Session self-service (docs/06 §7): the caller may see and revoke their own sessions.
+// Revocation is state-changing and therefore CSRF-protected; the list is a safe read.
+authRouter.get('/sessions', authenticate, getSessions);
+authRouter.delete(
+  '/sessions/:id',
+  authenticate,
+  csrfProtection,
+  validate({ params: idParamsSchema }),
+  deleteSession,
+);

@@ -1,6 +1,7 @@
 import { config } from '../config';
 import { isRedisConfigured, redisCommand, redisKey } from '../integrations/redis';
 import { logger } from '../utils/logger';
+import { recordJobRun } from './metrics.service';
 import { runSlaSweep } from './sla-sweep.service';
 
 /**
@@ -41,8 +42,12 @@ export function startSlaSweepScheduler(
 
     try {
       await runSlaSweep();
+      // "SLA sweep stalled" is a page-level alert (docs/34 §7): a sweep that silently
+      // stops breaching clocks looks healthy everywhere else (`docs/25` §6).
+      recordJobRun('sla_sweep', true);
     } catch (error) {
       // The sweep is not on the request path; a failure here must never crash the process.
+      recordJobRun('sla_sweep', false);
       logger.error({ err: error }, 'SLA sweep run failed');
     }
   };

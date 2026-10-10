@@ -13,6 +13,9 @@ import {
   type RequestStatus,
 } from '../api/requests.api';
 import { ApprovalsPanel } from '../components/approvals-panel';
+import { AttachmentPanel } from '../components/attachment-panel';
+import { KnowledgePanel } from '../components/knowledge-panel';
+import { RecordHistoryPanel } from '../components/record-history-panel';
 import { StatusBadge } from '../components/status-badge';
 import { TasksPanel } from '../components/tasks-panel';
 import { useAuth } from '../hooks/auth-context';
@@ -260,6 +263,18 @@ export function RequestDetailPage() {
         parentId={data.id}
         canCreate={hasPermission('task:create')}
       />
+
+      {/* Linked knowledge (docs/27 §9): the articles applied while fulfilling the request,
+          each shown at the version that was linked (rule K6). */}
+      <KnowledgePanel entityType="REQUEST" entityId={data.id} />
+
+      {/* Files (docs/19 §7): same parent record, same visibility — the panel uploads and
+          lists, and the server inherits this request's authorization rule. */}
+      <AttachmentPanel entityType="ServiceRequest" entityId={data.id} />
+
+      {/* Record history (docs/31 §11): the request's own audit trail, authorised by the
+          request's visibility rather than by an audit grant. */}
+      <RecordHistoryPanel entityType="ServiceRequest" entityId={data.id} />
 
       {/* Conversation ------------------------------------------------------ */}
       <section aria-labelledby="conversation-heading" className="space-y-3">

@@ -82,6 +82,15 @@ export function setOrganizationStatus(
  * query — an unbounded or double query is exactly what cursor pagination avoids. The
  * sort tuple is `(createdAt, id)`, with `id` the total-order tiebreaker.
  */
+/**
+ * Every organization id, active or not (`docs/32` §6). This is a **background-worker** query —
+ * the roster sweep iterates tenants — so it is deliberately unbounded and selects only the id;
+ * it is never reachable from a request path.
+ */
+export function listAllOrganizationIds(client: DataClient = prisma): Promise<{ id: string }[]> {
+  return client.organization.findMany({ select: { id: true } });
+}
+
 export function listOrganizations(
   params: { limit: number; cursor?: string },
   client: DataClient = prisma,

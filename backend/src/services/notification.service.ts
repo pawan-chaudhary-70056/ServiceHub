@@ -1,11 +1,14 @@
 import { config } from '../config';
 import type { EmailAdapter } from '../integrations';
 import { emailAdapter } from '../integrations/email';
+import { runResilient } from '../integrations/resilience';
 import {
   createNotification,
   findNotificationByDedupeKey,
+  findNotifiableUserIds,
   findPreference,
   findUserByEmail,
+  findUserById,
   listUndrainedOutbox,
   markNotificationDead,
   markNotificationSent,
@@ -17,7 +20,7 @@ import {
 } from '../models';
 import { logger } from '../utils/logger';
 import { getEventDefinition, inAppRecipientIds, isMandatory } from './notification-events';
-import { resolveNotificationTemplate } from './notification-templates';
+import { resolveNotificationTemplate, type NotificationTemplate } from './notification-templates';
 
 /**
  * The notifications drain worker (`docs/29` §3, §4, §7, §10, F-12).
@@ -71,6 +74,59 @@ async function isSuppressed(
   return preference ? !preference.enabled : false;
 }
 
+/**
+ * One email recipient: the address to send to, and the user row behind it when there is one
+ * (a preference needs a user, and the notification record is linked to one).
+ */
+interface EmailRecipient {
+  userId: string | null;
+  address: string;
+}
+
+/**
+ * Resolves an event's recipients to addresses (`docs/29` §4 step 1).
+ *
+ * Two sources, in the order the template declares them: an address written into the payload
+ * (onboarding only), and payload **user ids** looked up at send time. The lookup is the
+ * point of the id-based form — an event queued before someone changed their mailbox goes to
+ * the new one, and the queue never holds a mail address. An id that no longer resolves to a
+ * user, or resolves outside this event's tenant, is logged and skipped rather than failing
+ * the event: the person has left and the other recipients still deserve their mail.
+ */
+async function resolveEmailRecipients(
+  template: NotificationTemplate,
+  payload: Record<string, unknown>,
+  organizationId: string | null,
+): Promise<EmailRecipient[]> {
+  const recipients: EmailRecipient[] = [];
+  const addresses = new Set<string>();
+
+  const direct = template.recipient?.(payload) ?? null;
+  if (direct) {
+    addresses.add(direct);
+    recipients.push({ userId: (await findUserByEmail(direct))?.id ?? null, address: direct });
+  }
+
+  const declared = template.recipientUserIds?.(payload) ?? [];
+  const notifiable = new Set(await findNotifiableUserIds(declared, organizationId));
+  const dropped = [...new Set(declared)].filter((id) => !notifiable.has(id));
+  if (dropped.length > 0) {
+    logger.warn(
+      { eventType: template.eventType, dropped },
+      'Notification recipients dropped: they do not resolve inside this event’s tenant',
+    );
+  }
+
+  for (const id of notifiable) {
+    const user = await findUserById(id);
+    if (!user || addresses.has(user.email)) continue;
+    addresses.add(user.email);
+    recipients.push({ userId: user.id, address: user.email });
+  }
+
+  return recipients;
+}
+
 /** Creates the in-app rows for an event, if it is in-app notifiable and has recipients. */
 async function deliverInApp(
   row: { id: string; organizationId: string | null; eventType: string },
@@ -80,7 +136,17 @@ async function deliverInApp(
   const definition = getEventDefinition(row.eventType);
   if (!definition?.inApp) return;
 
-  const recipients = inAppRecipientIds(payload);
+  // The payload names people; the recipients must still resolve inside the event's tenant,
+  // or the row would surface another tenant's work in someone's in-app centre (ADR-0002).
+  const declared = inAppRecipientIds(payload);
+  const recipients = await findNotifiableUserIds(declared, row.organizationId);
+  if (recipients.length < declared.length) {
+    logger.warn(
+      { eventType: row.eventType, outboxId: row.id, declared: declared.length },
+      'In-app recipients dropped: they do not resolve inside this event’s tenant',
+    );
+  }
+
   for (const userId of recipients) {
     const dedupeKey = `${row.eventType}:${row.id}:${userId}:IN_APP`;
     const existing = await findNotificationByDedupeKey(dedupeKey);
@@ -166,8 +232,8 @@ export async function drainOutbox(
       continue;
     }
 
-    const recipient = template.recipient(payload);
-    if (!recipient) {
+    const recipients = await resolveEmailRecipients(template, payload, row.organizationId);
+    if (recipients.length === 0) {
       logger.warn(
         { eventType: row.eventType, outboxId: row.id },
         'Notification event has no recipient',
@@ -177,80 +243,110 @@ export async function drainOutbox(
       continue;
     }
 
-    const dedupeKey = `${row.eventType}:${row.id}:${recipient}:EMAIL`;
-    let notification = await findNotificationByDedupeKey(dedupeKey);
-
-    if (notification && TERMINAL_STATUSES.has(notification.status)) {
-      await markOutboxProcessed(row.id);
-      result.alreadyDone += 1;
-      continue;
-    }
-
-    // Preference is applied at the last moment (`29` N5), except for mandatory events (N6).
-    const recipientUser = await findUserByEmail(recipient);
-    if (recipientUser && (await isSuppressed(recipientUser.id, row.eventType, 'EMAIL'))) {
-      notification ??= await createNotification({
-        organizationId: row.organizationId,
-        userId: recipientUser.id,
-        recipient,
-        channel: 'EMAIL',
-        eventType: row.eventType,
-        templateVersion: template.version,
-        dedupeKey,
-      });
-      await markNotificationSkipped(notification.id, 'Suppressed by the recipient’s preference.');
-      await markOutboxProcessed(row.id);
-      result.skipped += 1;
-      continue;
-    }
-
+    // Bounded backoff applies to the whole event row, before any send this pass.
     if (row.attempts > 0 && now.getTime() < row.occurredAt.getTime() + backoffMs(row.attempts)) {
       result.notDue += 1;
       continue;
     }
 
-    notification ??= await createNotification({
-      organizationId: row.organizationId,
-      userId: recipientUser?.id ?? null,
-      recipient,
-      channel: 'EMAIL',
-      eventType: row.eventType,
-      templateVersion: template.version,
-      dedupeKey,
-    });
+    // One event can address several people (an approval step has a list of approvers), so
+    // each recipient is delivered independently under its own dedupe key (`29` N3). The row
+    // is released only once every recipient is terminal: a recipient still awaiting a retry
+    // keeps it undrained, and the recipients already SENT are skipped on the next pass
+    // rather than mailed twice (N4).
+    let retry = false;
+    let failureReason: string | null = null;
 
-    const message = template.render(payload);
-    const outcome = await adapter.send({
-      to: recipient,
-      from: config.EMAIL_FROM ?? 'no-reply@servicehub.local',
-      subject: message.subject,
-      text: message.text,
-      html: message.html,
-    });
+    for (const recipient of recipients) {
+      const dedupeKey = `${row.eventType}:${row.id}:${recipient.address}:EMAIL`;
+      let notification = await findNotificationByDedupeKey(dedupeKey);
 
-    if (outcome.accepted) {
-      await markNotificationSent(notification.id, outcome.providerMessageId ?? null);
-      await markOutboxProcessed(row.id);
-      result.delivered += 1;
-      continue;
-    }
+      if (notification && TERMINAL_STATUSES.has(notification.status)) {
+        result.alreadyDone += 1;
+        continue;
+      }
 
-    const reason = outcome.failureReason ?? 'Delivery was rejected by the provider.';
-    const updated = await recordNotificationFailure(notification.id, reason);
+      // Preference is applied at the last moment (`29` N5), except for mandatory events (N6).
+      if (recipient.userId && (await isSuppressed(recipient.userId, row.eventType, 'EMAIL'))) {
+        notification ??= await createNotification({
+          organizationId: row.organizationId,
+          userId: recipient.userId,
+          recipient: recipient.address,
+          channel: 'EMAIL',
+          eventType: row.eventType,
+          templateVersion: template.version,
+          dedupeKey,
+        });
+        await markNotificationSkipped(notification.id, 'Suppressed by the recipient’s preference.');
+        result.skipped += 1;
+        continue;
+      }
 
-    if (updated.attempts >= config.NOTIFICATION_MAX_ATTEMPTS) {
-      await markNotificationDead(notification.id, reason);
-      await markOutboxProcessed(row.id);
-      logger.error(
-        { eventType: row.eventType, outboxId: row.id, attempts: updated.attempts },
-        'Notification dead-lettered after exhausting retries',
+      notification ??= await createNotification({
+        organizationId: row.organizationId,
+        userId: recipient.userId,
+        recipient: recipient.address,
+        channel: 'EMAIL',
+        eventType: row.eventType,
+        templateVersion: template.version,
+        dedupeKey,
+      });
+
+      const message = template.render(payload);
+      // The email provider is one named integration (`docs/32` §8): while it is down its
+      // breaker is open, so the rest of this batch fails fast instead of each recipient
+      // paying a full provider timeout. A rejection is recorded like any provider failure,
+      // so the row retries and eventually dead-letters rather than silently disappearing.
+      const outcome = await runResilient(
+        'email',
+        () =>
+          adapter.send({
+            to: recipient.address,
+            from: config.EMAIL_FROM ?? 'no-reply@servicehub.local',
+            subject: message.subject,
+            text: message.text,
+            html: message.html,
+          }),
+        { isFailure: (result) => !result.accepted },
       );
-      result.deadLettered += 1;
+
+      if (outcome.ok && outcome.value.accepted) {
+        await markNotificationSent(notification.id, outcome.value.providerMessageId ?? null);
+        result.delivered += 1;
+        continue;
+      }
+
+      const reason =
+        (outcome.ok ? outcome.value.failureReason : outcome.reason) ??
+        'Delivery was rejected by the provider.';
+      const updated = await recordNotificationFailure(notification.id, reason);
+
+      if (updated.attempts >= config.NOTIFICATION_MAX_ATTEMPTS) {
+        await markNotificationDead(notification.id, reason);
+        logger.error(
+          {
+            eventType: row.eventType,
+            outboxId: row.id,
+            recipient: recipient.address,
+            attempts: updated.attempts,
+          },
+          'Notification dead-lettered after exhausting retries',
+        );
+        result.deadLettered += 1;
+        continue;
+      }
+
+      retry = true;
+      failureReason = reason;
+      result.failed += 1;
+    }
+
+    if (retry) {
+      await recordOutboxFailure(row.id, failureReason ?? 'Delivery failed.');
       continue;
     }
 
-    await recordOutboxFailure(row.id, reason);
-    result.failed += 1;
+    await markOutboxProcessed(row.id);
   }
 
   return result;

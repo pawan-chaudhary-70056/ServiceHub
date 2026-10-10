@@ -1,0 +1,176 @@
+# Alert rules — one group per core alert in docs/34 §7.2.
+#
+# Rules, not noise (docs/34 §7): every rule here has an owner, a severity, a threshold
+# justified by the document, and a runbook link into docs/36. If a rule fires without a useful
+# action it is deleted or fixed (§7.3). Alerts are expressed on rate and duration wherever the
+# condition is a rate, so a single blip does not flap a page.
+
+groups:
+  - name: servicehub-availability
+    rules:
+      - alert: ServiceHubApiDown
+        expr: up{job="servicehub-backend"} == 0
+        for: 2m
+        labels:
+          severity: page
+          owner: backend
+        annotations:
+          summary: A ServiceHub API instance is not answering scrapes.
+          description: |
+            `up == 0` for two minutes. Check the instance's liveness probe before anything
+            else; if liveness is failing the orchestrator will replace it (docs/34 §6 —
+            liveness must not depend on the database).
+          runbook_url: docs/36-OPERATIONS-AND-RECOVERY.md
+
+      - alert: ServiceHubErrorRateHigh
+        # 5xx share of all completed requests, over a five-minute rate window. Threshold 5%
+        # sustained for ten minutes: above that the user-visible failure rate is real, not a
+        # single retried request.
+        expr: |
+          sum(rate(servicehub_http_requests_total{status_class="5xx"}[5m]))
+            /
+          sum(rate(servicehub_http_requests_total[5m]))
+            > 0.05
+        for: 10m
+        labels:
+          severity: page
+          owner: backend
+        annotations:
+          summary: 5xx error ratio is above 5% over ten minutes.
+          description: |
+            Use the failing `route` label to localise it; the error response carries a
+            correlation id that a support ticket can quote back (docs/34 §3.4).
+          runbook_url: docs/36-OPERATIONS-AND-RECOVERY.md
+
+      - alert: ServiceHubLatencyHigh
+        # p95 from the latency histogram. The target is the D-7 SLO; keep this number in step
+        # with docs/02 §D-7 rather than inventing one here.
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(servicehub_http_request_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 10m
+        labels:
+          severity: page
+          owner: backend
+        annotations:
+          summary: p95 request latency is above 1s sustained.
+          description: |
+            Check the integration circuit gauges first — a slow remote shows up as request
+            latency until its breaker opens (docs/32 §8).
+          runbook_url: docs/36-OPERATIONS-AND-RECOVERY.md
+
+  - name: servicehub-workers
+    rules:
+      - alert: ServiceHubSlaSweepStalled
+        # The page-level alert docs/25 §6 insists on: a sweep that silently stops breaching
+        # clocks looks healthy everywhere else, and the breach is only discovered by a manager.
+        # The grace is 5x the default 60s interval.
+        expr: time() - servicehub_job_last_success_timestamp_seconds{job="sla_sweep"} > 300
+        for: 5m
+        labels:
+          severity: page
+          owner: backend
+        annotations:
+          summary: The SLA sweep has not succeeded in five minutes.
+          description: |
+            A silent SLA failure. Check the singleton lock (a stale leader key) before the
+            sweep itself; N instances each sweeping duplicates breach events.
+          runbook_url: docs/36-OPERATIONS-AND-RECOVERY.md
+
+      - alert: ServiceHubWorkerStalled
+        # The background queue as a whole: notifications, report exports, outbound and inbound
+        # webhooks. Roster sync is deliberately excluded — it is a no-op without a directory
+        # adapter, so "never succeeded" is its correct state rather than a stall.
+        expr: |
+          time() - servicehub_job_last_success_timestamp_seconds{
+            job=~"notification_drain|report_export|webhook_delivery|inbound_webhook"
+          } > 600
+        for: 10m
+        labels:
+          severity: warn
+          owner: backend
+        annotations:
+          summary: A background worker has not succeeded in ten minutes.
+          description: |
+            Threshold is 5x the slowest default interval in the set. The `job` label names the
+            stalled worker; a roster-sync job is excluded because it is intentionally a no-op
+            without a directory adapter.
+          runbook_url: docs/36-OPERATIONS-AND-RECOVERY.md
+
+      - alert: ServiceHubJobFailing
+        expr: |
+          sum by (job) (increase(servicehub_job_runs_total{result="failure"}[15m])) > 3
+        for: 0m
+        labels:
+          severity: warn
+          owner: backend
+        annotations:
+          summary: A background job failed more than three times in fifteen minutes.
+          description: |
+            Repeated failure, not a single blip. Poison messages dead-letter rather than retry
+            forever (docs/03 J4); the dead-letter viewer shows the payloads.
+          runbook_url: docs/36-OPERATIONS-AND-RECOVERY.md
+
+  - name: servicehub-integrations
+    rules:
+      - alert: ServiceHubIntegrationCircuitOpen
+        expr: servicehub_integration_circuit_state == 2
+        for: 5m
+        labels:
+          severity: warn
+          owner: backend
+        annotations:
+          summary: An integration's circuit breaker is open.
+          description: |
+            The integration label names which one. Deliveries are failing fast on purpose; once
+            the remote recovers the breaker half-opens and closes after its probe successes
+            (docs/32 §8). An explicit dead-letter retry clears the breaker for that
+            subscription.
+          runbook_url: docs/32-INTEGRATIONS.md
+
+      - alert: ServiceHubIntegrationAtCapacity
+        expr: servicehub_integration_bulkhead_queued > 0
+        for: 10m
+        labels:
+          severity: warn
+          owner: backend
+        annotations:
+          summary: An integration has had calls queued for ten minutes.
+          description: |
+            Sustained queueing means the remote is slower than its bulkhead allows. Tune the
+            integration's configuration (`PATCH /admin/integrations/config/{key}`) rather than
+            raising it blindly — the bulkhead exists to bound capacity (docs/32 §8).
+          runbook_url: docs/32-INTEGRATIONS.md
+
+  - name: servicehub-runtime
+    rules:
+      - alert: ServiceHubMemoryHigh
+        expr: servicehub_process_resident_memory_bytes > 1.5e9
+        for: 15m
+        labels:
+          severity: warn
+          owner: backend
+        annotations:
+          summary: Resident memory is above 1.5 GiB for fifteen minutes.
+          description: |
+            Sustained growth suggests a leak rather than a burst. Heap snapshots are the next
+            step; this rule is a warning rather than a page because the process is still
+            healthy at this point.
+          runbook_url: docs/36-OPERATIONS-AND-RECOVERY.md
+
+      - alert: ServiceHubRestartLoop
+        expr: |
+          changes(servicehub_process_start_time_seconds[15m]) > 2
+        for: 0m
+        labels:
+          severity: page
+          owner: backend
+        annotations:
+          summary: An instance has restarted more than twice in fifteen minutes.
+          description: |
+            A crash loop. Check the shutdown exit path and the unhandled-rejection handler
+            first; the process exits deliberately on an unknown state rather than serving from
+            it (docs/34 §6).
+          runbook_url: docs/36-OPERATIONS-AND-RECOVERY.md

@@ -66,9 +66,10 @@ export interface SchedulerOptions {
  * SLA breach/at-risk sweep (`25`), report and export generation (`30`), inbound
  * integration reconciliation (`32`), and retention/archival maintenance (`19`, `33`).
  *
- * The broker is Redis (`ADR-0003`). The worker process and scheduler are not part of
- * the scaffold: they are added with the first real handlers, because a worker with
- * nothing to run is untestable infrastructure.
+ * The broker is Redis (`ADR-0003`). The worker workload now exists as its own entrypoint,
+ * `src/worker.ts` (`PROCESS_ROLE=worker`), because the six schedulers must not share a process
+ * with the HTTP listener (`docs/03` §3: a worker must not serve HTTP). This module remains the
+ * envelope and policy description; the running schedules are each `services/*-scheduler.ts`.
  */
 export const registeredHandlers: readonly JobHandler[] = [];
 export const registeredSchedules: readonly SchedulerOptions[] = [];

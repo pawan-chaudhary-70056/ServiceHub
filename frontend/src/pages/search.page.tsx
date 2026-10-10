@@ -19,9 +19,18 @@ const TYPE_LABEL: Record<SearchEntityType, string> = {
   INCIDENT: 'Incidents',
   CATALOG_ITEM: 'Catalog',
   USER: 'People',
+  ARTICLE: 'Knowledge',
+  ASSET: 'Assets',
 };
 
-const ORDER: SearchEntityType[] = ['REQUEST', 'INCIDENT', 'CATALOG_ITEM', 'USER'];
+const ORDER: SearchEntityType[] = [
+  'REQUEST',
+  'INCIDENT',
+  'ARTICLE',
+  'ASSET',
+  'CATALOG_ITEM',
+  'USER',
+];
 
 export function SearchPage() {
   const [term, setTerm] = useState('');

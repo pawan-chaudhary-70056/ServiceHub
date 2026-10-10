@@ -58,6 +58,31 @@ export type UserWithRoles = Prisma.UserGetPayload<{
 }>;
 
 /**
+ * Narrows a list of user ids to those that may receive a notification: the user must
+ * exist, and belong to the tenant that owns the event when the event has one.
+ *
+ * A notification whose `userId` points outside the row's tenant would surface another
+ * tenant's work in that person's in-app centre, and an id for a deleted user violates the
+ * foreign key outright. Both are decided in the query (`ADR-0002`), never by trusting the
+ * payload, so a stale or foreign id is dropped rather than delivered.
+ */
+export async function findNotifiableUserIds(
+  userIds: readonly string[],
+  organizationId: string | null,
+  client: DataClient = prisma,
+): Promise<string[]> {
+  if (userIds.length === 0) return [];
+  const rows = await client.user.findMany({
+    where: {
+      id: { in: [...userIds] },
+      ...(organizationId ? { organizationId } : {}),
+    },
+    select: { id: true },
+  });
+  return rows.map((row) => row.id);
+}
+
+/**
  * Lists a tenant's users, newest-first, cursor-paginated (`docs/11` §6).
  *
  * The mandatory tenant predicate is applied **inside** the query (`ADR-0002`), never as a

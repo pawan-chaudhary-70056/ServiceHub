@@ -10,8 +10,10 @@
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "dev:worker": "PROCESS_ROLE=worker tsx watch src/worker.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
+    "start:worker": "PROCESS_ROLE=worker node dist/worker.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -25,6 +27,7 @@
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:seed": "tsx prisma/seed.ts",
     "bootstrap:operator": "tsx prisma/bootstrap-platform-operator.ts",
+    "operator:reset-password": "tsx prisma/reset-operator-password.ts",
     "prisma:studio": "prisma studio"
   },
   "dependencies": {
@@ -44,6 +47,7 @@
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.5",
     "@types/supertest": "^6.0.2",
+    "@vitest/coverage-v8": "^2.1.9",
     "eslint": "^9.18.0",
     "prettier": "^3.4.2",
     "prisma": "^6.2.1",

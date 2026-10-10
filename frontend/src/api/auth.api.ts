@@ -44,6 +44,37 @@ export function fetchMe(signal?: AbortSignal): Promise<MeResponse> {
 }
 
 /**
+ * One of the caller's live sessions (`docs/06` §7). Deliberately carries no token or
+ * digest: the id is enough to revoke, and nothing here should be a credential in a
+ * screenshot or a log.
+ */
+export interface SessionView {
+  id: string;
+  createdAt: string;
+  lastSeenAt: string;
+  idleExpiresAt: string;
+  absoluteExpiresAt: string;
+  sourceIp: string | null;
+  userAgent: string | null;
+  current: boolean;
+}
+
+/**
+ * `GET /auth/sessions` — the caller's own sessions.
+ *
+ * There is no parameter to pass a user id: the server keys the query on the
+ * authenticated identity, so the UI cannot ask about anyone else.
+ */
+export function listSessions(signal?: AbortSignal): Promise<{ items: SessionView[] }> {
+  return apiRequest<{ items: SessionView[] }>('/auth/sessions', { signal });
+}
+
+/** `DELETE /auth/sessions/{id}` — revokes one session, immediately and server-side. */
+export function revokeSession(id: string): Promise<void> {
+  return apiRequest<void>(`/auth/sessions/${id}`, { method: 'DELETE' });
+}
+
+/**
  * Requests a password reset. Always resolves: the server returns `202` whether or not
  * the address exists, and the UI must not imply otherwise (docs/06 §5).
  */

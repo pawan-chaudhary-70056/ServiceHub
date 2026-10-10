@@ -12,6 +12,7 @@ import {
   grantRoleToUser,
   prisma,
 } from '../src/models';
+import { fileStorage } from '../src/integrations/storage';
 import { processQueuedExports } from '../src/services/report-export.service';
 
 /**
@@ -335,6 +336,14 @@ describe('Async report exports', () => {
       expect(download.text).toContain('category,key,value');
       // The report ran with the admin's cross-team scope (R3): tenure shows the scope.
       expect(download.text).toContain('# scope,any');
+
+      // The bytes live in object storage, not in the row (ADR-0004, docs/19 §7.1): the export
+      // carries a key, and that key is readable through the configured driver. This is the
+      // difference the CR-0003 interim made — a database dump is no longer a data export.
+      const row = await prisma.reportExport.findUniqueOrThrow({ where: { id } });
+      expect(row.storageKey).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/);
+      const stored = await fileStorage().open(row.storageKey as string);
+      expect(stored).not.toBeNull();
     },
   );
 

@@ -142,6 +142,16 @@ re-running is safe and adding a permission does not duplicate existing ones.
 - Bootstrap is **guarded**: if a platform operator already exists, it refuses and exits
   0, so it is safe to re-run.
 - The bootstrap event is **audited**: actor type `SYSTEM`, action `platform.bootstrap`.
+- **Recovery of a lost operator password is its own guarded command**, not an ad-hoc
+  console edit: `npm run operator:reset-password` (see the `2026-10-11` operator-password
+  recovery entry in `43` §3). It reads the new
+  password from `OPERATOR_NEW_PASSWORD`, applies the real policy and Argon2id parameters
+  from the application's helpers, refuses an ambiguous target (more than one operator with
+  no `OPERATOR_EMAIL`), **revokes every live session** for the account, and writes a
+  `password.reset` audit entry with actor type `SYSTEM` in the same transaction as the
+  change. Because the bootstrap refuses once an operator exists, this is the supported way
+  back in — and it exists so that "the superadmin password is lost" is not resolved by
+  inventing a procedure at the console.
 - **Tenant provisioning** is the next step and is owned by `04` §13.2: a platform
   operator creates an `Organization` and, in the **same transaction**, seeds that
   tenant's reference data (default roles + role→permission mapping per `07` §3; baseline

@@ -1,6 +1,6 @@
 # 28 — Asset Management
 
-**Status:** Draft · **Owner:** Product Lead · **Reviewer:** Backend Lead
+**Status:** Approved · **Owner:** Product Lead · **Reviewer:** Backend Lead · **Approved:** 2026-10-07
 **Consolidates:** old 61
 
 > **Scope:** the asset register and its assignment history. **How assets are linked to
@@ -86,13 +86,17 @@ does not remove the row.
 
 ## 6. Permissions
 
+Permission keys are the canonical ones from `07` §3 (the permission catalogue is owned
+by `07`; this document does not mint new keys).
+
 | Action | Permission |
 |---|---|
-| View assets | `asset:read` (scoped; holders see their own) |
+| View assets (own) | `asset:read.own` — a holder sees the assets they hold |
+| View assets (tenant) | `asset:read.any` |
 | Manage assets | `asset:manage` |
 | Assign / return | `asset:assign` |
 | Manage asset types | `admin:config` |
-| Disposal | `asset:dispose` (admin), audited |
+| Disposal | `asset:manage` (administrator), audited — never a hard delete (`AM5`) |
 
 ## 7. Integration with Requests, Incidents and Catalog
 

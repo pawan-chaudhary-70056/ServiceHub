@@ -78,3 +78,51 @@ export const unsupportedSmsAdapter: SmsAdapter = {
     };
   },
 };
+
+/**
+ * Outbound webhook HTTP contract (`docs/32` §3/§4).
+ *
+ * The domain owns this interface: the delivery worker hands the adapter a fully-signed
+ * request and reasons only about "delivered" or "failed", never about HTTP status codes or
+ * a vendor's error shape. A webhook is an HTTP call, so the adapter is also where the
+ * explicit timeout lives — the worker never sets one (`docs/32` §8).
+ */
+export interface WebhookHttpRequest {
+  url: string;
+  headers: Record<string, string>;
+  /** The exact bytes that were signed. Sent verbatim; a receiver verifies the raw body. */
+  body: string;
+  timeoutMs: number;
+}
+
+export interface WebhookHttpResult {
+  delivered: boolean;
+  /** HTTP status when a response was received; undefined on a transport failure. */
+  status?: number;
+  /** Domain-level reason, safe to store and show. Never the raw response body. */
+  failureReason?: string;
+}
+
+export interface WebhookHttpClient {
+  send(request: WebhookHttpRequest): Promise<WebhookHttpResult>;
+}
+
+/**
+ * Directory (user roster) contract for inbound sync (`docs/32` §6).
+ *
+ * The domain owns this interface: the roster sync reasons about the people a directory reports
+ * and asks nothing about LDAP, SCIM or a vendor's pagination. `externalId` is the **stable**
+ * identity the mapping table is keyed on; `email` is mutable and is never the key (`§6`).
+ */
+export interface DirectoryUser {
+  /** The source's immutable identity for the person. */
+  externalId: string;
+  email: string;
+  displayName: string;
+  /** Whether the source still considers the person present and active. */
+  active: boolean;
+}
+
+export interface DirectoryAdapter {
+  fetchRoster(): Promise<DirectoryUser[]>;
+}

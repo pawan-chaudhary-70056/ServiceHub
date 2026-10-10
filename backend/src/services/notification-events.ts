@@ -13,9 +13,16 @@ import { OUTBOX_EVENT } from './audit-events';
  *   - **INFORMATIONAL** — opt out, digestible.
  *
  * The catalogue also declares which events surface in the **in-app centre** and how to
- * derive their recipients from the event payload. An event whose payload carries no
- * recipient id is email-only for now; making it in-app is a payload change in the owning
- * service, named in the `docs/43` entry rather than faked here.
+ * derive their recipients from the event payload.
+ *
+ * A recipient is read from the payload by id, never by address: which person a
+ * "your incident was resolved" mail belongs to is a fact of the domain (the reporter), so
+ * the owning service puts the **id** on the event and the worker resolves the address at
+ * send time (`notification-templates.ts`). The events that still carry no recipient id —
+ * SLA warnings (whose payload is a clock, not a person) and the status-change and
+ * major-incident events — are therefore in-app only where a payload names someone and
+ * email-less otherwise; closing that gap is a payload change in the owning service, which
+ * `docs/43` tracks rather than this module faking a recipient.
  */
 
 export type NotificationClass = 'TRANSACTIONAL' | 'OPERATIONAL' | 'INFORMATIONAL';
@@ -93,8 +100,18 @@ const DEFINITIONS: readonly EventDefinition[] = [
       link: recordLink('/requests', 'requestId'),
     },
   },
-  { eventType: OUTBOX_EVENT.APPROVAL_APPROVED, class: 'OPERATIONAL' },
-  { eventType: OUTBOX_EVENT.APPROVAL_REJECTED, class: 'OPERATIONAL' },
+  // The requester learns the outcome (`docs/26` A7): the decision moves the request on
+  // its own, so the person who raised it is told rather than left to poll.
+  {
+    eventType: OUTBOX_EVENT.APPROVAL_APPROVED,
+    class: 'OPERATIONAL',
+    inApp: { title: 'Your request was approved', link: recordLink('/requests', 'requestId') },
+  },
+  {
+    eventType: OUTBOX_EVENT.APPROVAL_REJECTED,
+    class: 'OPERATIONAL',
+    inApp: { title: 'Your request was rejected', link: recordLink('/requests', 'requestId') },
+  },
 
   // Requests and incidents — operational, in-app to the assignee.
   {
@@ -114,7 +131,11 @@ const DEFINITIONS: readonly EventDefinition[] = [
     },
   },
   { eventType: OUTBOX_EVENT.INCIDENT_REPORTED, class: 'OPERATIONAL' },
-  { eventType: OUTBOX_EVENT.INCIDENT_RESOLVED, class: 'OPERATIONAL' },
+  {
+    eventType: OUTBOX_EVENT.INCIDENT_RESOLVED,
+    class: 'OPERATIONAL',
+    inApp: { title: 'Your incident was resolved', link: recordLink('/incidents', 'incidentId') },
+  },
   { eventType: OUTBOX_EVENT.INCIDENT_REOPENED, class: 'OPERATIONAL' },
   { eventType: OUTBOX_EVENT.INCIDENT_PRIORITY_OVERRIDDEN, class: 'OPERATIONAL' },
   { eventType: OUTBOX_EVENT.INCIDENT_MAJOR_DECLARED, class: 'OPERATIONAL' },

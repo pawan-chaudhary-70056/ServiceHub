@@ -19,12 +19,12 @@ import { deriveState, pauseClockIfPolicy, resumeClock, startClock } from '../src
  * (targets are computed at start and frozen) need the clock mechanics, so they run
  * against a real database.
  *
- * **Documentation discrepancy (example 2).** §4 states the result as *Thu 15:00*, but its
- * own stated inputs ("2 hours elapsed before pause; resumes Wed 09:00") yield **Wed
- * 15:00** — 8 working hours less the 2 consumed before the pause, resumed on Wednesday.
- * The stated date does not follow from the stated inputs, so this suite asserts the
- * **rule** (the remaining budget is exactly preserved) rather than the disputed literal.
- * The discrepancy is recorded for the owner; the engine is not silently bent to match it.
+ * Example 2 is asserted as **Wed 15:00**, matching §4 after `CR-0004` corrected the
+ * literal (it previously read *Thu 15:00*, which its own reasoning — "2 hours elapsed
+ * before pause; resumes Wed 09:00" — contradicts) and fixed `resumeClock` to exclude the
+ * pause's *working* minutes only. The cross-day cases below are the regression tests for
+ * that fix: a pause that spans a night must not exclude the closed hours a second time
+ * (`25` §14 AC2).
  */
 
 const LONDON_MON_FRI: CalendarSpec = {
@@ -107,7 +107,10 @@ function dbIt(name: string, fn: () => Promise<void> | void): void {
   });
 }
 
-async function createPolicyFixture(suffix: string): Promise<SlaPolicyWithTargets> {
+async function createPolicyFixture(
+  suffix: string,
+  model: 'WORKING_HOURS' | 'WALL_CLOCK' = 'WORKING_HOURS',
+): Promise<SlaPolicyWithTargets> {
   const organization = await prisma.organization.create({
     data: {
       name: `SLA Examples ${suffix}`,
@@ -119,10 +122,12 @@ async function createPolicyFixture(suffix: string): Promise<SlaPolicyWithTargets
   const calendar = await prisma.businessCalendar.create({
     data: {
       organizationId: organization.id,
-      name: 'Business hours',
+      name: model === 'WALL_CLOCK' ? '24x7' : 'Business hours',
       timeZone: 'Europe/London',
-      model: 'WORKING_HOURS',
-      workingHours: LONDON_MON_FRI.workingHours as unknown as object,
+      model,
+      workingHours: (model === 'WALL_CLOCK'
+        ? {}
+        : LONDON_MON_FRI.workingHours) as unknown as object,
       holidays: [],
     },
   });
@@ -213,6 +218,92 @@ describe('docs/25 §4 worked examples — clock mechanics', () => {
           targetAt: resumed.targetAt,
         }),
       );
+    },
+  );
+
+  dbIt(
+    'CR-0004 regression: an overnight pause excludes only its working minutes (AC2)',
+    async () => {
+      const policy = await createPolicyFixture(`overnight-${Date.now()}`);
+
+      const startedAt = new Date('2026-03-11T10:00:00Z'); // Wed 10:00 London
+      const pausedAt = new Date('2026-03-11T12:00:00Z'); // Wed 12:00
+      const resumedAt = new Date('2026-03-12T09:00:00Z'); // Thu 09:00, overnight wait
+
+      const clock = await runInTransaction(async (tx) => {
+        const created = await startClock(
+          {
+            organizationId: policy.organizationId,
+            entityType: 'ServiceRequest',
+            entityId: 'overnight',
+            slaPolicy: policy,
+            priority: 'HIGH',
+            startAt: startedAt,
+          },
+          tx,
+        );
+        await pauseClockIfPolicy(
+          'ServiceRequest',
+          'overnight',
+          'APPROVAL_PENDING',
+          policy,
+          pausedAt,
+          tx,
+        );
+        await resumeClock('ServiceRequest', 'overnight', resumedAt, tx);
+        return created;
+      });
+
+      const resumed = await prisma.slaClock.findFirstOrThrow({ where: { id: clock.id } });
+      // Only Wed 12:00–17:00 (5 working hours) of the 21-hour wall-clock pause counts.
+      expect(resumed.totalPausedSeconds).toBe(5 * 60 * 60);
+      // 2 of the 8 working hours were consumed before the pause, so 6 remain from Thu
+      // 09:00 → Thu 15:00. The buggy wall-clock shift would have produced Mon 15:00.
+      expect(local(resumed.targetAt)).toBe('2026-03-12 15:00');
+      expect(resumed.targetAt.getTime()).toBe(
+        addWorkingMinutes(resumedAt, 480 - 120, LONDON_MON_FRI).getTime(),
+      );
+    },
+  );
+
+  dbIt(
+    'CR-0004: a 24x7 clock still excludes the full wall-clock pause (Model B unchanged)',
+    async () => {
+      const policy = await createPolicyFixture(`wall-${Date.now()}`, 'WALL_CLOCK');
+
+      const startedAt = new Date('2026-03-11T10:00:00Z');
+      const pausedAt = new Date('2026-03-11T12:00:00Z');
+      const resumedAt = new Date('2026-03-12T09:00:00Z');
+
+      const clock = await runInTransaction(async (tx) => {
+        const created = await startClock(
+          {
+            organizationId: policy.organizationId,
+            entityType: 'ServiceRequest',
+            entityId: 'wall-clock',
+            slaPolicy: policy,
+            priority: 'HIGH',
+            startAt: startedAt,
+          },
+          tx,
+        );
+        await pauseClockIfPolicy(
+          'ServiceRequest',
+          'wall-clock',
+          'APPROVAL_PENDING',
+          policy,
+          pausedAt,
+          tx,
+        );
+        await resumeClock('ServiceRequest', 'wall-clock', resumedAt, tx);
+        return created;
+      });
+
+      const resumed = await prisma.slaClock.findFirstOrThrow({ where: { id: clock.id } });
+      // A 24x7 calendar has no frozen time, so the whole 21 hours is excluded.
+      expect(resumed.totalPausedSeconds).toBe(21 * 60 * 60);
+      // Start + 8 wall-clock hours = Wed 18:00; + 21 hours = Thu 15:00.
+      expect(resumed.targetAt.getTime()).toBe(startedAt.getTime() + 29 * 60 * 60 * 1000);
     },
   );
 

@@ -202,6 +202,49 @@ export async function apiRequest<TResponse>(
 }
 
 /**
+ * Uploads a `FormData` body (multipart) — the file pipeline's client half
+ * (docs/19 §7.2).
+ *
+ * Kept beside `apiRequest` so this module remains the only place that performs `fetch`:
+ * the same CSRF header, credential policy, problem parsing and error typing apply, and
+ * the only difference is that the browser — not this module — sets the multipart content
+ * type, because a hand-set one would lose the boundary.
+ */
+export async function apiUpload<TResponse>(
+  path: string,
+  form: FormData,
+  signal?: AbortSignal,
+): Promise<TResponse> {
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  const csrf = readCookie(CSRF_COOKIE_NAME);
+  if (csrf) {
+    headers['X-CSRF-Token'] = csrf;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${BASE_URL}${path}`, {
+      method: 'POST',
+      headers,
+      credentials: 'include',
+      body: form,
+      ...(signal ? { signal } : {}),
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error;
+    }
+    throw new NetworkError(error);
+  }
+
+  const body = await parseBody(response);
+  if (!response.ok) {
+    throw new ApiError(response.status, isProblemBody(body) ? body : undefined);
+  }
+  return body as TResponse;
+}
+
+/**
  * A downloaded file's bytes plus the server's chosen filename (`docs/30` §5).
  */
 export interface DownloadedFile {

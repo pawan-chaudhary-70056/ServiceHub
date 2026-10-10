@@ -42,11 +42,29 @@ const requestReportExport = vi.fn().mockResolvedValue({
   export: { ...succeeded, status: 'QUEUED', downloadUrl: null },
 });
 
+/** The figures a given metric returns, so a metric switch is observable in the UI. */
+function reportFor(metric: string): ReportResult {
+  if (metric === 'tasks.workload') {
+    return {
+      ...report,
+      metric: 'tasks.workload',
+      figures: {
+        open: 4,
+        overdue: 2,
+        completedInWindow: 7,
+        overdueSharePercent: 50,
+        byStatus: { TODO: 3, IN_PROGRESS: 1 },
+      },
+    };
+  }
+  return { ...report, metric: metric as ReportResult['metric'] };
+}
+
 vi.mock('../api/search.api', async () => {
   const actual = await vi.importActual<typeof import('../api/search.api')>('../api/search.api');
   return {
     ...actual,
-    runReport: async () => ({ report }),
+    runReport: async (metric: string) => ({ report: reportFor(metric) }),
     requestReportExport: (...args: unknown[]) => requestReportExport(...args),
     getReportExport: async () => ({ export: succeeded }),
   };
@@ -69,6 +87,18 @@ describe('ReportsPage', () => {
 
     expect(await screen.findByText('scope: any')).toBeInTheDocument();
     expect(screen.getByText('OPEN')).toBeInTheDocument();
+  });
+
+  it('renders the newer metric figures, not just the summary tables (docs/30 §3.3)', async () => {
+    const user = userEvent.setup();
+    renderReports();
+
+    await user.selectOptions(await screen.findByLabelText('Report'), 'tasks.workload');
+
+    expect(await screen.findByText('Overdue share')).toBeInTheDocument();
+    expect(screen.getByText('50%')).toBeInTheDocument();
+    expect(screen.getByText('Completed in period')).toBeInTheDocument();
+    expect(screen.getByText('7')).toBeInTheDocument();
   });
 
   it('queues an export and offers a download once it succeeds', async () => {

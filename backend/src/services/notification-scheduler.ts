@@ -1,6 +1,7 @@
 import { config } from '../config';
 import { isRedisConfigured, redisCommand, redisKey } from '../integrations/redis';
 import { logger } from '../utils/logger';
+import { recordJobRun } from './metrics.service';
 import { drainOutbox } from './notification.service';
 
 /**
@@ -37,8 +38,12 @@ export function startNotificationScheduler(
 
     try {
       await drainOutbox();
+      // "Queue depth / dead letters growing" is a core alert (`docs/34` §7.2) and it is
+      // answered by "has the drain succeeded recently?" — which needs this timestamp.
+      recordJobRun('notification_drain', true);
     } catch (error) {
       // Delivery is off the request path; a failure here must never crash the process.
+      recordJobRun('notification_drain', false);
       logger.error({ err: error }, 'Notification drain failed');
     }
   };

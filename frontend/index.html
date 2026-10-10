@@ -11,6 +11,30 @@
     -->
     <meta name="referrer" content="strict-origin-when-cross-origin" />
     <title>ServiceHub</title>
+
+    <!-- App icon and browser chrome. Same-origin only: the CSP allows no external image. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="theme-color" content="#2563eb" />
+
+    <!--
+      Share metadata (docs/16). A shared link previously rendered as a bare URL; these
+      tags give it a title, description and card. `og:url` is deliberately absent until
+      the canonical production origin is a build-time value — a wrong canonical URL is
+      worse than none.
+    -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="ServiceHub" />
+    <meta property="og:title" content="ServiceHub — enterprise service management" />
+    <meta
+      property="og:description"
+      content="Raise, route, approve, fulfil and audit service requests — with SLAs, knowledge, assets and integrations."
+    />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="ServiceHub — enterprise service management" />
+    <meta
+      name="twitter:description"
+      content="Raise, route, approve, fulfil and audit service requests — with SLAs, knowledge, assets and integrations."
+    />
   </head>
   <body>
     <div id="root"></div>

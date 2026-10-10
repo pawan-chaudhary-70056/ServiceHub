@@ -1,0 +1,46 @@
+# Static analysis (SAST) — docs/20 §2 ("injection sinks, unsafe patterns, taint flows",
+# every PR) and §3 (any High or Critical finding fails the build).
+#
+# CodeQL is used rather than a hand-written pattern list because the value of SAST is
+# dataflow across files: a tainted request value reaching a query is invisible to a
+# regex, and this codebase's whole authorization story rests on values never reaching a
+# query unvalidated (docs/17 §2).
+#
+# The analysis runs in its own workflow so a long scan does not hold the build pipeline,
+# and it is a required check on main like every other gate.
+
+name: SAST
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly re-scan: a new query pack can find an old defect.
+    - cron: '0 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    name: CodeQL (JavaScript/TypeScript)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+
+      - name: Perform analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:javascript-typescript'

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { prisma, type DataClient } from './db';
 
 /**
- * Human-readable reference allocation (docs/22 §4).
+ * Human-readable reference allocation (docs/22 §4, extended by docs/28 §3).
  *
  * `REQ-YYYY-NNNNNN` must be unique under concurrency, and the allocation must not abort
  * the caller's transaction. The first naive approach — `create`, catch the unique
@@ -18,7 +18,12 @@ import { prisma, type DataClient } from './db';
  * Only `services/` may import this module (docs/03 §4).
  */
 
-export type ReferenceType = 'REQ' | 'INC';
+/**
+ * `REQ` for requests and `INC` for incidents (`docs/22` §4); `AST` for assets
+ * (`docs/28` §3 — the `AST-000123` tag). The counter is per `(organization, type,
+ * period)`, so each of these has its own sequence.
+ */
+export type ReferenceType = 'REQ' | 'INC' | 'AST';
 
 export async function reserveReferenceValue(
   organizationId: string,

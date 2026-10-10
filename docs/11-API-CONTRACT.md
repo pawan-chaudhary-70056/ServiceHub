@@ -213,6 +213,8 @@ whether it is paginated, and its audit event.
 | POST | `/auth/reset` | public | Token-based; revokes sessions |
 | POST | `/auth/accept-invitation` | public | Establishes first credential; single-use (`06` §11) |
 | GET | `/auth/me` | authenticated | Identity + effective entitlements |
+| GET | `/auth/sessions` | authenticated | The caller's own live sessions (`06` §7): activity, source address/agent and `current`. Scoped to the authenticated user — there is no id to substitute |
+| DELETE | `/auth/sessions/{id}` | authenticated | Revokes one of the caller's own sessions, immediately and audited (`session.revoke`); another user's session is a `404`, not a `403` (`17` §5) |
 
 ### Platform (`ADR-0012`, `07` §5)
 Platform operations are separate from tenant administration: a platform operator holds
@@ -235,8 +237,11 @@ tenant records.
 | PATCH | `/users/{id}` | `user:manage` (limited fields for self) |
 | POST | `/users/{id}/deactivate` | `user:manage` |
 | GET | `/roles` | `user:manage` — tenant-assignable roles only |
-| GET | `/teams` | `catalog:read` — tenant's active teams (read-only; membership management later) |
-| GET/POST | `/teams`, `/teams/{id}` | `admin:config` / team-scoped read |
+| GET | `/teams` | `catalog:read` — tenant's active teams, for routing pickers |
+| POST | `/teams` | `user:manage` — creates a team; a duplicate name in the tenant is a `409` |
+| GET | `/teams/{id}/members` | `user:manage` — the team and its members |
+| POST | `/teams/{id}/members` | `user:manage` — adds or re-roles a member; audited. The target must be an active user of the **same tenant** (`422` otherwise), because membership is what team scope resolves to (`07` §6) |
+| DELETE | `/teams/{id}/members/{userId}` | `user:manage` — removes a member; idempotent and audited |
 | GET/PUT | `/roles/{id}/permissions` | `user:role:manage` |
 
 ### Catalog (`21`)
@@ -274,7 +279,9 @@ tenant records.
 | POST | `/requests/{id}/comments` | one of the read grants | `INTERNAL` requires an agent; a requester must never receive one |
 | GET | `/requests/{id}/comments` | one of the read grants | Internal notes filtered in the query |
 | PATCH | `/requests/{id}` | `request:update.*` | Not yet implemented |
-| GET | `/requests/{id}/history` | audit projection | Not yet implemented |
+| GET | `/requests/{id}/history` | (not implemented) | The capability is served by the generic `/audit/records/{entityType}/{entityId}` projection (`31` §10), which a participant reads through the record's own visibility |
+| GET | `/requests/{id}/knowledge-links` | one of the read grants | Linked articles (`27` §8); **each resolves to the version linked at the time** (rule K6), and an archived article still resolves with a banner |
+| POST | `/requests/{id}/knowledge-links` | `kb:article:read` | Links a published article the caller may read; the parent's own visibility decides whether the link may be added |
 
 ### Incidents (`23`)
 | Method | Path | Permission | Notes |
@@ -290,6 +297,8 @@ tenant records.
 | POST | `/incidents/{id}/major` | `incident:update.any` | Toggles `isMajor`; audited in **both** directions |
 | GET/POST | `/incidents/{id}/comments` | one of the read grants | `INTERNAL` requires an agent; a reporter must never receive one |
 | GET | `/incidents/{id}/history` | one of the read grants | Audit projection (`31` §8) |
+| GET | `/incidents/{id}/knowledge-links` | one of the read grants | Linked articles (`27` §8), resolved to the version linked at the time (rule K6) |
+| POST | `/incidents/{id}/knowledge-links` | `kb:article:read` | Links a published article the caller may read |
 
 ### Tasks (`24`)
 | Method | Path | Permission | Notes |
@@ -312,15 +321,42 @@ tenant records.
 | GET | `/admin/approval-templates` | `admin:config` | Tenant templates |
 | POST | `/admin/approval-templates` | `admin:config` | `{ catalogItemId, name, steps:[{ stepOrder, mode, approverRoleKey }] }`; `201` with `Location`. A catalog item may only enter `APPROVAL_PENDING` once an activated item has an active template with a non-empty eligible approver snapshot — otherwise `409` |
 
-### SLA (`25`), KB (`27`), Assets (`28`)
-Same pattern per resource. Notable action endpoints:
-
+### SLA (`25`)
 | Method | Path | Permission |
 |---|---|---|
 | GET | `/sla/clocks/{id}` | scoped |
 | POST | `/sla/clocks/{id}/override` | `sla:clock:override` + reason |
-| POST | `/kb/articles/{id}/publish` | `kb:article:publish` |
-| POST | `/assets/{id}/assign` | `asset:assign` |
+
+### Knowledge base (`27`)
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/kb/articles` | `kb:article:read` | Visibility-filtered **in the query, before ranking** (rule K3); cursor-paginated; `status`/`categoryId` filters. A plain reader is served the **published snapshot**, never an unreviewed working copy (`27` AC2) |
+| GET | `/kb/articles/{id}` | `kb:article:read` | Accepts the opaque id **or** the slug. A retired slug redirects to its article (AC5). A caller who may not read the article receives `404`, not `403`. An archived article resolves with `archived: true` |
+| POST | `/kb/articles` | `kb:article:author` | Creates a draft; body is Markdown and **raw HTML is rejected** (K2); `409 DUPLICATE` on a slug collision |
+| PATCH | `/kb/articles/{id}` | `kb:article:author` | Edits the **working copy**; a published article's snapshot is untouched until republish (AC2). A slug change records a redirect (AC5) |
+| POST | `/kb/articles/{id}/submit` | `kb:article:author` | `DRAFT → IN_REVIEW` |
+| POST | `/kb/articles/{id}/reject` | `kb:article:publish` | `IN_REVIEW → DRAFT`; reason required |
+| POST | `/kb/articles/{id}/publish` | `kb:article:publish` | Creates an immutable version; the reviewer must differ from the author (`409`, rule K1) |
+| POST | `/kb/articles/{id}/archive` | `kb:article:publish` | Leaves search; direct links still resolve (AC4). Deletion does not exist (K7) |
+| POST | `/kb/articles/{id}/unarchive` | `kb:article:publish` | `ARCHIVED → PUBLISHED` |
+| POST | `/kb/articles/{id}/feedback` | `kb:article:read` | Helpful / not-helpful (§9) |
+| GET | `/kb/categories`, `/kb/stats` | `kb:article:read` | Browse tree and the status board |
+| POST/PATCH | `/kb/categories`, `/kb/categories/{id}` | `admin:config` | Category management |
+
+### Assets (`28`)
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/assets` | `asset:read.own` and/or `asset:read.any` | Holder-scoped **in the query**; cursor-paginated; `state`/`assetTypeId`/`holderUserId` filters. A holder sees what they hold |
+| GET | `/assets/{id}` | as above | Accepts the opaque id **or** the `AST-000123` tag. Out-of-scope reads as `404` |
+| POST | `/assets` | `asset:manage` | Registers an asset; the **tag is allocated server-side** (`AST-000123`, atomic per tenant); required type attributes are validated (AM7) |
+| PATCH | `/assets/{id}` | `asset:manage` | Field edits. `ASSIGNED`/`DISPOSED` are **not** settable here — they are transitions (AM6); `409` while an assignment is open |
+| GET | `/assets/{id}/assignments` | as read | The full interval history, including the open interval |
+| POST | `/assets/{id}/assign` | `asset:assign` | `{ holderType, userId \| teamId, notes? }`; `409` when an assignment is already open (AM1) or the holder is deactivated; sets `state = ASSIGNED` **in the same transaction** (AM6) |
+| POST | `/assets/{id}/return` | `asset:assign` | Closes the interval with `returnedAt` — the row is kept as history (AM3) |
+| POST | `/assets/{id}/repair` | `asset:manage` | Moves into repair, closing any open assignment |
+| POST | `/assets/{id}/retire` | `asset:manage` | Closes any open assignment; read-only afterwards (AM4). Never a delete (AM5) |
+| POST | `/assets/{id}/dispose` | `asset:manage` | `RETIRED → DISPOSED`, terminal |
+| GET/POST/PATCH | `/admin/asset-types`, `/admin/asset-types/{id}` | `asset:read.*` to read; `admin:config` to manage | Type definitions with their required-attribute schema |
 
 ### Platform (`29`–`32`)
 | Method | Path | Notes |
@@ -329,13 +365,39 @@ Same pattern per resource. Notable action endpoints:
 | POST | `/notifications/{id}/read`, `/notifications/read-all` | Self only; idempotent. A notification the caller does not own is a `404` |
 | GET/PUT | `/me/notification-preferences` | Self only; per event and channel. A TRANSACTIONAL event (`29` N6) cannot be disabled — the request is refused with `422`, not silently ignored |
 | GET | `/search` | Unified search across readable sources; **no single permission** — each source is scoped to the caller (`30` §2.3 S1). Params `q`, `types`, `limit`, `cursor`; response states the sources searched and any `EXACT_ONLY` fallback |
-| GET | `/reports/{metric}` | `report:read`; a cross-team metric (`sla.attainment`) needs `report:read.all` (`30` §4). Metrics: `requests.summary`, `incidents.summary`, `tasks.summary`, `sla.attainment`. Response carries period, time zone and scope (`30` §3.2 R2) |
+| GET | `/reports/{metric}` | `report:read`; a cross-team metric (`sla.attainment`, `notifications.delivery`) needs `report:read.all` (`30` §4). Metrics: `requests.summary`, `incidents.summary`, `tasks.summary`, `tasks.workload`, `sla.attainment`, `notifications.delivery`; an unknown name is a `404` rather than an empty report. Response carries period, time zone and scope (`30` §3.2 R2); a rate with an empty denominator is `null`, never `0` |
 | POST | `/reports/{metric}/export` | `report:export`; queues an async job (`30` §3.1/§3.4), returns `202` with `{ export }` — never blocks on the aggregate. Body `{ from?, to? }`; audited with its filters (`30` R5) |
 | GET | `/reports/jobs/{id}` | `report:export`; the caller's own export job and, once `SUCCEEDED`, its time-limited `downloadUrl` (`30` §5). Another user's job is a `404` |
-| GET | `/reports/jobs/{id}/download` | `report:export`; the CSV, `text/csv` with a `Content-Disposition` filename. Refused with `404` unless the caller requested it and the link has not expired (`30` §5) |
-| GET | `/audit` | `audit:read`; cursor paginated |
-| POST/GET | `/attachments` | access inherits parent |
-| GET | `/health`, `/health/ready`, `/health/live` | unauthenticated, minimal detail |
+| GET | `/reports/jobs/{id}/download` | `report:export`; the CSV — `text/csv` with a `Content-Disposition` filename, or a `302` to a short-lived signed object-storage URL when the driver issues one (`ADR-0004`, `19` §7.3). Refused with `404` unless the caller requested it and the link has not expired (`30` §5) |
+| GET | `/audit` | `audit:read.team` and/or `audit:read.all` | Scoped **in the query** — `team` selects the caller's team members' entries, `all` the tenant; cursor-paginated; filters `action`, `actorId`, `entityType`, `entityId`, `from`, `to`, `securityOnly`. Security-class entries are **withheld**, not merely flagged, without `audit:read.security`; **every read is itself audited** (`31` §5, AC5) |
+| GET | `/audit/security` | `audit:read.security` | The security class only (`31` §2); the request is refused outright for a caller without the grant, not returned empty |
+| GET | `/audit/records/{entityType}/{entityId}` | the record's own visibility, or an audit read grant | A record's history without the security class (`31` §5/§10). A participant needs only to be able to read the record; an unauthorised caller receives the record's own `404` |
+| POST | `/audit/export` | `audit:export` (+ any `audit:read.*`; `securityOnly` also needs `audit:read.security`) | Queues an async export (`31` §9/§10, `30` §5) and returns `202` with `{ export }` — never blocks on the query. Body is the explorer filter set without pagination; audited with its filters |
+| GET | `/audit/exports/{id}` | `audit:export` | The caller's own export job (`30` §5); another user's job is a `404` |
+| GET | `/audit/exports/{id}/download` | `audit:export` | The CSV while the link is live — streamed as `text/csv`, or a `302` to a signed object-storage URL when the driver issues one; refused with `404` unless the caller requested it and it has not expired |
+| GET | `/admin/integrations` | `integration:read` | The health board (`32` §12/§13): one uniform row per integration (outbound subscription or inbound endpoint) with last success, last error, dead-letter count and a derived error rate; `healthy` is derived server-side and unhealthy rows are returned first |
+| GET | `/admin/integrations/roster-sync` | `integration:read` | The last roster sync's outcome, counts and mapped-user total (`32` §6/§12); `NEVER_RUN` before the first run |
+| POST | `/admin/integrations/roster-sync` | `integration:manage` | Runs a roster sync now; audited. Body `{ confirmDrift?: boolean }`. The service's drift guard **aborts** a run that would deactivate more than the configured fraction unless `confirmDrift` is set |
+| GET | `/admin/webhooks` | `integration:read` | The tenant's webhook subscriptions with a dead-letter count (`32` §12). The signing secret is **never** returned; only a `secretHint` (last four characters) |
+| GET | `/admin/webhooks/events` | `integration:read` | The subscribable event vocabulary (`32` §4), served from the outbox event catalogue so the admin UI cannot drift from the names the system emits |
+| POST | `/admin/webhooks` | `integration:manage` | Creates a subscription (`32` §4). The signing secret is generated server-side and returned **once**, in this response only; audited (without the secret) |
+| PATCH | `/admin/webhooks/{id}` | `integration:manage` | Edits a subscription or rotates its secret; audited. A rotation records `secretRotated: true`, never the secret |
+| GET | `/admin/integrations/config` | `integration:read` | The integration catalogue (`32` §2/§12) merged with this tenant's settings: effective reliability knobs, the catalogue defaults they override, the enabled flag, a **credential reference** (`env:NAME`) and whether a runtime adapter is present. Never a credential value |
+| PATCH | `/admin/integrations/config/{key}` | `admin:config` | Configures one integration (`32` §7/§11/§13); audited with a before/after that carries the reference but no secret. Body `{ enabled?, config?, credentialRef? }`. `config` is the `32` §8 reliability tuning (breaker/bulkhead/retry/timeout), validated per catalogue key; `credentialRef` must be a **reference** — a value is `422` |
+| POST | `/admin/integrations/config/{key}/test` | `admin:config` | A bounded connectivity check (`32` §13); audited. Answers `OK`/`FAILED` for an integration with a single global endpoint and `SKIPPED` where reachability is per-endpoint and proved by delivery. Never sends live traffic |
+| GET | `/admin/integrations/dead-letters` | `integration:read` | Dead-lettered deliveries, newest first (`32` §12/§13), with a total count |
+| POST | `/admin/integrations/dead-letters/{id}/retry` | `integration:retry` | Requeues one delivery for another attempt chain; audited (`32` §11) |
+| GET | `/admin/inbound-endpoints` | `integration:read` | The tenant's inbound receivers (`32` §5/§12). The verification secret is never returned; only a `secretHint` |
+| POST | `/admin/inbound-endpoints` | `integration:manage` | Registers a receiver (`32` §5). The key is the `{provider}` path segment (unique, URL-safe); the verification secret is returned **once**; audited (without the secret) |
+| PATCH | `/admin/inbound-endpoints/{id}` | `integration:manage` | Enable/disable or rotate the secret; audited. A rotation records `secretRotated: true` |
+| GET | `/admin/integrations/inbound-dead-letters` | `integration:read` | Dead-lettered inbound events, newest first (`32` §5/§13), with a total count |
+| POST | `/admin/integrations/inbound-dead-letters/{id}/retry` | `integration:retry` | Requeues one inbound event for another attempt chain; audited |
+| POST | `/webhooks/inbound/{provider}` | **public** — HMAC signature over the raw body is the authentication | Receives an inbound delivery (`32` §5): **verify → persist the raw event → ack (`202`)**; processing is a worker, never this request. Unsigned, stale, malformed or duplicate deliveries are handled as §5 requires: the first three are `401`, a duplicate is a `202` no-op. Not CSRF-protected (no cookie session) but rate-limited |
+| GET | `/attachments?entityType=&entityId=` | access inherits parent | A record's `AVAILABLE` attachments (`19` §7). `PENDING` and `QUARANTINED` rows are never listed |
+| POST | `/attachments` | access inherits parent | Multipart upload (`19` §7.2): size-capped before the body is read, sniffed against the allow-list, stored under a server-generated key. Fields `entityType` (`ServiceRequest` \| `Incident` \| `Article`), `entityId`, `file`. `422` with `FILE_REJECTED` for a spoofed type or an executable/script/HTML payload — and the attempt is retained as `QUARANTINED` and audited; `413` past 10 MB; `409` past 20 per record; `404` when the parent is not visible |
+| GET | `/attachments/{id}/content` | access inherits parent | Authorised **and audited on every request** (`19` §7.3): the parent's visibility is re-checked, the file is served as `application/octet-stream` with an `attachment` disposition unless it is an image, with `nosniff` and `private, no-store`. A signed short-lived URL is returned instead when the storage driver is object storage (`ADR-0004`) |
+| GET | `/health`, `/health/ready`, `/health/live` | unauthenticated, minimal detail | |
+| GET | `/health/metrics` | unauthenticated, internal only | Prometheus text exposition (`34` §4): RED metrics labelled by **route pattern** (never an id), SLA-sweep success/failure timestamps and process gauges. Answered from memory, so scraping adds no database load |
 | GET | `/openapi.json` | spec, non-production exposure |
 
 ## 10. OpenAPI and Client Contract

@@ -1,8 +1,14 @@
 import type { Prisma, Priority, SlaClock, SlaClockState } from '@prisma/client';
-import { addWorkingMinutes, type CalendarSpec, type WorkingWindow } from '../helpers/calendar';
+import {
+  addWorkingMinutes,
+  workingMinutesBetween,
+  type CalendarSpec,
+  type WorkingWindow,
+} from '../helpers/calendar';
 import {
   createSlaClock,
   findOpenSlaClock,
+  findSlaPolicyById,
   pauseSlaClock,
   resumeSlaClock,
   stopSlaClock,
@@ -133,6 +139,13 @@ export async function pauseClockIfPolicy(
  * left alone, so leaving a pause state twice cannot double-count.
  *
  * The target is shifted, not recomputed, so the frozen-target rule (§4 example 5) holds.
+ *
+ * **The shift is by *working* minutes, not wall-clock minutes (docs/25 §14 AC2).** Under a
+ * working-hours calendar the clock has already been frozen through the pause's nights and
+ * weekends; adding the pause's wall-clock length would exclude that closed time a second
+ * time — the double-counting AC2 forbids, and the error that silently grants a desk extra
+ * SLA budget for an overnight approval wait. A 24×7 calendar has no frozen time, so its
+ * working minutes are the wall-clock minutes.
  */
 export async function resumeClock(
   entityType: ClockEntityType,
@@ -144,10 +157,16 @@ export async function resumeClock(
   if (!clock || !clock.pausedAt) {
     return;
   }
-  const pausedSeconds = Math.max(
-    0,
-    Math.floor((resumeAt.getTime() - clock.pausedAt.getTime()) / 1000),
-  );
+
+  // The clock's own policy calendar decides what counts as working time. Loading it here
+  // keeps the frozen-target rule intact: only the *shift* uses the calendar, never a
+  // recomputation of the target from the policy's current targets.
+  const policy = await findSlaPolicyById(clock.slaPolicyId, tx);
+  const pausedMinutes = policy
+    ? workingMinutesBetween(clock.pausedAt, resumeAt, toCalendarSpec(policy))
+    : Math.floor((resumeAt.getTime() - clock.pausedAt.getTime()) / 60_000);
+  const pausedSeconds = Math.max(0, pausedMinutes) * 60;
+
   const newState = deriveState({
     now: resumeAt,
     paused: false,

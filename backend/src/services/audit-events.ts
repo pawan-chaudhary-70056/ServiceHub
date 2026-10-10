@@ -58,6 +58,49 @@ export const AUDIT_ACTION = {
   APPROVAL_CANCELLED: 'approval.cancelled',
   REPORT_EXPORT_REQUESTED: 'report.export.requested',
   REPORT_EXPORT_COMPLETED: 'report.export.completed',
+  INTEGRATION_SUBSCRIPTION_CREATE: 'integration.subscription.create',
+  INTEGRATION_SUBSCRIPTION_UPDATE: 'integration.subscription.update',
+  INTEGRATION_DEAD_LETTER_RETRY: 'integration.dead_letter.retry',
+  INTEGRATION_INBOUND_ENDPOINT_CREATE: 'integration.inbound.endpoint.create',
+  INTEGRATION_INBOUND_ENDPOINT_UPDATE: 'integration.inbound.endpoint.update',
+  INTEGRATION_INBOUND_RETRY: 'integration.inbound.retry',
+  INTEGRATION_ROSTER_SYNC: 'integration.roster.sync',
+  // Integration configuration administration (docs/32 §7/§11): configuring an integration
+  // and testing its connectivity are `admin:config` actions and are audited.
+  INTEGRATION_CONFIG_UPDATE: 'integration.config.update',
+  INTEGRATION_CONFIG_TEST: 'integration.config.test',
+  ARTICLE_CREATE: 'kb.article.create',
+  ARTICLE_UPDATE: 'kb.article.update',
+  ARTICLE_REVIEW: 'kb.article.review',
+  ARTICLE_PUBLISH: 'kb.article.publish',
+  ARTICLE_ARCHIVE: 'kb.article.archive',
+  ARTICLE_LINK: 'kb.article.link',
+  ARTICLE_CATEGORY_CREATE: 'kb.category.create',
+  ARTICLE_CATEGORY_UPDATE: 'kb.category.update',
+  ASSET_CREATE: 'asset.create',
+  ASSET_UPDATE: 'asset.update',
+  ASSET_ASSIGN: 'asset.assign',
+  ASSET_RETURN: 'asset.return',
+  ASSET_RETIRE: 'asset.retire',
+  ASSET_DISPOSE: 'asset.dispose',
+  ASSET_TYPE_CREATE: 'asset.type.create',
+  ASSET_TYPE_UPDATE: 'asset.type.update',
+  AUDIT_READ: 'audit.read',
+  AUDIT_EXPORT_REQUESTED: 'audit.export.requested',
+  AUDIT_EXPORT_COMPLETED: 'audit.export.completed',
+  // File pipeline (docs/19 §7.2/§7.3): an upload is a mutation of the record it lands
+  // on, a download of a Confidential attachment is a disclosure, and a rejected upload
+  // is a security event worth retaining.
+  ATTACHMENT_UPLOAD: 'attachment.upload',
+  ATTACHMENT_DOWNLOAD: 'attachment.download',
+  ATTACHMENT_QUARANTINED: 'attachment.quarantined',
+  // Session self-service (docs/06 §7): revoking another of your own sessions is a
+  // security-relevant act and is recorded like a logout.
+  SESSION_REVOKE: 'session.revoke',
+  // Team administration (docs/07 §6, F-02).
+  TEAM_CREATE: 'team.create',
+  TEAM_MEMBER_ADD: 'team.member.add',
+  TEAM_MEMBER_REMOVE: 'team.member.remove',
 } as const;
 
 export const AUDIT_ENTITY = {
@@ -79,6 +122,19 @@ export const AUDIT_ENTITY = {
   APPROVAL_DECISION: 'ApprovalDecision',
   COMMENT: 'Comment',
   REPORT_EXPORT: 'ReportExport',
+  ARTICLE: 'Article',
+  ARTICLE_CATEGORY: 'ArticleCategory',
+  ASSET: 'Asset',
+  ASSET_TYPE: 'AssetType',
+  ASSET_ASSIGNMENT: 'AssetAssignment',
+  AUDIT_LOG: 'AuditLog',
+  AUDIT_EXPORT: 'AuditExport',
+  WEBHOOK_SUBSCRIPTION: 'WebhookSubscription',
+  INBOUND_WEBHOOK_ENDPOINT: 'InboundWebhookEndpoint',
+  INTEGRATION_SETTING: 'IntegrationSetting',
+  DIRECTORY_SYNC: 'DirectorySync',
+  ATTACHMENT: 'Attachment',
+  TEAM: 'Team',
 } as const;
 
 /** Outbox event types drained by workers (docs/13 §7, docs/29 §3). */

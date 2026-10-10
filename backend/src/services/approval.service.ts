@@ -488,6 +488,9 @@ async function applyRequestOutcome(
         workflowId: workflow.id,
         requestId: workflow.request.id,
         reference: workflow.request.reference,
+        // The outcome is addressed to the person who raised the request (`docs/29` §5):
+        // the id travels on the event and the worker resolves the address at send time.
+        requesterId: workflow.request.requesterId,
         outcome,
       },
     },
@@ -549,7 +552,14 @@ export async function reassignApprovalStep(
         organizationId: workflow.organizationId,
         eventType: OUTBOX_EVENT.APPROVAL_REASSIGNED,
         idempotencyKey: `approval.reassigned:${step.id}:${Date.now()}`,
-        payload: { workflowId: workflow.id, stepId: step.id, approverIds: eligible },
+        payload: {
+          workflowId: workflow.id,
+          stepId: step.id,
+          approverIds: eligible,
+          // Without the request id the reassignment notification had no link to follow.
+          requestId: workflow.request.id,
+          reference: workflow.request.reference,
+        },
       },
       tx,
     );

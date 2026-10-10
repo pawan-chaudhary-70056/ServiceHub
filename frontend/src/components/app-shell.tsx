@@ -95,9 +95,34 @@ export function AppShell({ children }: AppShellProps) {
                     Catalog
                   </Link>
                 )}
+                {hasPermission('kb:article:read') && (
+                  <Link to="/kb" className="text-content-muted hover:text-content">
+                    Knowledge
+                  </Link>
+                )}
+                {(hasPermission('asset:read.own') || hasPermission('asset:read.any')) && (
+                  <Link to="/assets" className="text-content-muted hover:text-content">
+                    Assets
+                  </Link>
+                )}
+                {(hasPermission('audit:read.team') || hasPermission('audit:read.all')) && (
+                  <Link to="/audit" className="text-content-muted hover:text-content">
+                    Audit log
+                  </Link>
+                )}
+                {hasPermission('audit:read.security') && (
+                  <Link to="/audit/security" className="text-content-muted hover:text-content">
+                    Security activity
+                  </Link>
+                )}
                 {hasPermission('user:manage') && (
                   <Link to="/users" className="text-content-muted hover:text-content">
                     Users
+                  </Link>
+                )}
+                {hasPermission('user:manage') && (
+                  <Link to="/teams" className="text-content-muted hover:text-content">
+                    Teams
                   </Link>
                 )}
                 {hasPermission('admin:config') && (
@@ -108,7 +133,16 @@ export function AppShell({ children }: AppShellProps) {
                     Approval templates
                   </Link>
                 )}
+                {hasPermission('integration:read') && (
+                  <Link to="/admin/integrations" className="text-content-muted hover:text-content">
+                    Integrations
+                  </Link>
+                )}
                 <NotificationBell />
+                {/* Self-scoped, so it is always available to a signed-in user (docs/06 §7). */}
+                <Link to="/account/security" className="text-content-muted hover:text-content">
+                  Security
+                </Link>
                 <span className="text-content">{user?.displayName}</span>
                 <button
                   type="button"

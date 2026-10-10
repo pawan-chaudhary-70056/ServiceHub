@@ -1,6 +1,6 @@
 # 32 — Integrations
 
-**Status:** Draft · **Owner:** Backend Lead · **Reviewer:** Security Lead
+**Status:** Approved · **Owner:** Backend Lead · **Reviewer:** Security Lead · **Approved:** 2026-10-08
 **Consolidates:** old 68
 
 > **Scope:** how ServiceHub talks to external systems and how external systems talk to
@@ -165,9 +165,12 @@ handling, or the database.
 | GET | `/admin/integrations` | Status, last success, last error |
 | POST/PATCH | `/admin/integrations/{id}` | Configure; audited |
 | GET/POST/PATCH | `/admin/webhooks` | Subscription management |
-| POST | `/webhooks/inbound/{provider}` | Public, signature-verified, idempotent |
+| GET/POST/PATCH | `/admin/inbound-endpoints` | Inbound receiver management; the verification secret is returned once, on create |
+| POST | `/webhooks/inbound/{provider}` | Public, signature-verified, idempotent; **verify → persist → ack**, processed by a worker |
 | GET | `/admin/integrations/{id}/dead-letters` | Failed payloads |
+| GET | `/admin/integrations/inbound-dead-letters` | Failed inbound events |
 | POST | `/admin/integrations/dead-letters/{id}/retry` | Audited |
+| POST | `/admin/integrations/inbound-dead-letters/{id}/retry` | Audited |
 
 ## 13. UI Surfaces
 
