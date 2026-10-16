@@ -1,8 +1,55 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
 
-/**
+@theme {
+  --color-surface: rgb(var(--sh-surface));
+  --color-surface-muted: rgb(var(--sh-surface-muted));
+  --color-surface-raised: rgb(var(--sh-surface-raised));
+
+  --color-content: rgb(var(--sh-content));
+  --color-content-muted: rgb(var(--sh-content-muted));
+  --color-content-inverted: rgb(var(--sh-content-inverted));
+
+  --color-border: rgb(var(--sh-border));
+  --color-border-strong: rgb(var(--sh-border-strong));
+
+  --color-brand: rgb(var(--sh-brand));
+  --color-brand-strong: rgb(var(--sh-brand-strong));
+
+  --color-success: rgb(var(--sh-success));
+  --color-warning: rgb(var(--sh-warning));
+  --color-danger: rgb(var(--sh-danger));
+  --color-info: rgb(var(--sh-info));
+
+  --radius-sm: var(--sh-radius-sm);
+  --radius: var(--sh-radius);
+  --radius-lg: var(--sh-radius-lg);
+
+  --font-sans: var(--sh-font-sans);
+  --font-mono: var(--sh-font-mono);
+
+  --default-ring-color: rgb(var(--sh-brand));
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+}
+
+@layer utilities {
+  /**
  * Design tokens (docs/15-DESIGN-SYSTEM.md).
  *
  * Colours are stored as space-separated RGB channels so Tailwind can apply opacity
@@ -13,59 +60,61 @@
  * everywhere: a breached SLA, an overdue task and a rejected approval are the same
  * concept and must not drift into three different reds.
  */
-:root {
-  --sh-surface: 255 255 255;
-  --sh-surface-muted: 246 247 249;
-  --sh-surface-raised: 255 255 255;
+  :root {
+    --sh-surface: 255 255 255;
+    --sh-surface-muted: 246 247 249;
+    --sh-surface-raised: 255 255 255;
 
-  --sh-content: 17 24 39;
-  --sh-content-muted: 90 100 118;
-  --sh-content-inverted: 255 255 255;
+    --sh-content: 17 24 39;
+    --sh-content-muted: 90 100 118;
+    --sh-content-inverted: 255 255 255;
 
-  --sh-border: 222 226 232;
-  --sh-border-strong: 176 184 196;
+    --sh-border: 222 226 232;
+    --sh-border-strong: 176 184 196;
 
-  --sh-brand: 37 99 235;
-  --sh-brand-strong: 29 78 216;
+    --sh-brand: 37 99 235;
+    --sh-brand-strong: 29 78 216;
 
-  --sh-success: 21 128 61;
-  --sh-warning: 180 83 9;
-  --sh-danger: 185 28 28;
-  --sh-info: 29 78 216;
+    --sh-success: 21 128 61;
+    --sh-warning: 180 83 9;
+    --sh-danger: 185 28 28;
+    --sh-info: 29 78 216;
 
-  --sh-radius-sm: 4px;
-  --sh-radius: 8px;
-  --sh-radius-lg: 12px;
+    --sh-radius-sm: 4px;
+    --sh-radius: 8px;
+    --sh-radius-lg: 12px;
 
-  --sh-font-sans:
-    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --sh-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
+    --sh-font-sans:
+      ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+      'Helvetica Neue', Arial, sans-serif;
+    --sh-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
 
-/**
+  /**
  * Dark theme is a token swap, not a second stylesheet. This is the payoff for keeping
  * colours out of components.
  */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --sh-surface: 17 24 39;
-    --sh-surface-muted: 30 38 56;
-    --sh-surface-raised: 24 32 48;
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --sh-surface: 17 24 39;
+      --sh-surface-muted: 30 38 56;
+      --sh-surface-raised: 24 32 48;
 
-    --sh-content: 243 245 248;
-    --sh-content-muted: 165 174 189;
-    --sh-content-inverted: 17 24 39;
+      --sh-content: 243 245 248;
+      --sh-content-muted: 165 174 189;
+      --sh-content-inverted: 17 24 39;
 
-    --sh-border: 51 62 82;
-    --sh-border-strong: 90 102 126;
+      --sh-border: 51 62 82;
+      --sh-border-strong: 90 102 126;
 
-    --sh-brand: 96 165 250;
-    --sh-brand-strong: 147 197 253;
+      --sh-brand: 96 165 250;
+      --sh-brand-strong: 147 197 253;
 
-    --sh-success: 74 222 128;
-    --sh-warning: 251 191 36;
-    --sh-danger: 248 113 113;
-    --sh-info: 96 165 250;
+      --sh-success: 74 222 128;
+      --sh-warning: 251 191 36;
+      --sh-danger: 248 113 113;
+      --sh-info: 96 165 250;
+    }
   }
 }
 
@@ -87,7 +136,7 @@
    * invisible focus ring makes the application unusable by keyboard (docs/16).
    */
   :focus-visible {
-    @apply outline-none ring-2 ring-brand ring-offset-2;
+    @apply outline-hidden ring-2 ring-brand ring-offset-2;
     /* Tailwind's ring-offset utilities read these custom properties; setting a
        non-existent `ring-offset-color` CSS property would be silently ignored. */
     --tw-ring-offset-color: rgb(var(--sh-surface));
