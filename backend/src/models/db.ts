@@ -21,6 +21,14 @@ export const prisma: PrismaClient =
     // Query logs stay off: they echo parameters and are a data-leak and noise risk
     // (docs/34 L1). Warnings and errors are always surfaced.
     log: ['warn', 'error'],
+    // Explicit transaction bounds (`docs/33` §4). The library defaults are not: a 2 s
+    // `maxWait` turns a burst of concurrent writes into a wave of `P2028` failures, and a
+    // client that fails the writes it could have queued is worse than one that queues
+    // them — the point of the pool is to bound concurrency, not to drop work.
+    transactionOptions: {
+      maxWait: config.DB_TRANSACTION_MAX_WAIT_MS,
+      timeout: config.DB_TRANSACTION_TIMEOUT_MS,
+    },
   });
 
 if (!isProduction) {

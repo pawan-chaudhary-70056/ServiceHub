@@ -12,6 +12,7 @@ import {
   type IncidentUrgency,
 } from '../api/incidents.api';
 import { listTeams, type TeamSummary } from '../api/teams.api';
+import { SlaIndicator } from '../components/sla-indicator';
 import { StatusBadge } from '../components/status-badge';
 import { incidentStatusTone, priorityTone } from '../utils/request-tones';
 
@@ -141,6 +142,9 @@ function IncidentRow({ incident }: { incident: IncidentSummary }) {
           </span>
         </span>
         <span className="flex items-center gap-2">
+          {/* docs/25 §12: state plus time remaining in every list, so the worst records
+              sort themselves out by eye. */}
+          <SlaIndicator sla={incident.sla} />
           <StatusBadge tone={priorityTone(incident.priority)}>{incident.priority}</StatusBadge>
           <StatusBadge tone={incidentStatusTone(incident.status)}>{incident.status}</StatusBadge>
         </span>

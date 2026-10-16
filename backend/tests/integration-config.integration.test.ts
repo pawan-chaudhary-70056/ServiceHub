@@ -219,7 +219,12 @@ describe('Integration configuration administration', () => {
         .expect(200);
 
       const rows = listed.body.integrations as IntegrationRow[];
+      // The catalogue is the single source of truth for "which integrations exist", so it is
+      // asserted exactly: an integration that appears without an entry here would be
+      // invisible to an administrator, and one that disappears silently would be worse.
+      // `antivirus` was added with the asynchronous scan step (`docs/19` §7.2).
       expect(rows.map((row) => row.key).sort()).toEqual([
+        'antivirus',
         'directory',
         'email',
         'inbound_webhooks',

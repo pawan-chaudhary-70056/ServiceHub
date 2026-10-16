@@ -1,18 +1,19 @@
 import { expect, test } from '@playwright/test';
 
 /**
- * Smoke journey for the scaffold shell.
+ * Shell smoke test.
  *
- * This is a placeholder for the four journeys that E2E owns once the domain exists
- * (docs/37 §7):
+ * The four journeys E2E owns (docs/37 §7) now live beside this file, one per journey:
  *
- *   1. sign in → raise a request → approval → resolution
- *   2. raise an incident → assign → resolve → notification
- *   3. search finds a restricted record only for an authorised user
- *   4. an administrator edits a catalog item → a previous request is unchanged
+ *   1. `journey-request-lifecycle.spec.ts`
+ *   2. `journey-incident.spec.ts`
+ *   3. `journey-search-authorization.spec.ts`
+ *   4. `journey-catalog-fidelity.spec.ts`
  *
- * It asserts only what the scaffold guarantees: the app renders, is reachable by
- * keyboard, and does not expose an error to the console.
+ * Those journeys need a deployed stack and one credential set per role, so they skip when
+ * the environment is not configured. This test is what remains runnable regardless: it
+ * asserts the app renders, is reachable by keyboard, and exposes no console error. It is
+ * deliberately kept — a journey that skips must not leave the shell itself unverified.
  */
 test.describe('application shell', () => {
   test('renders the shell and is reachable without JavaScript errors', async ({ page }) => {

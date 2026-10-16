@@ -72,16 +72,13 @@ export const resolveIncidentSchema = z
 
 export type ResolveIncidentInput = z.infer<typeof resolveIncidentSchema>;
 
-export const transitionIncidentSchema = z
-  .object({
-    to: incidentStatusSchema,
-    /** Required when reopening outside the configured window (rule I4). */
-    reason: z.string().trim().max(2000).optional(),
-  })
-  .strict();
-
-export type TransitionIncidentInput = z.infer<typeof transitionIncidentSchema>;
-
+/**
+ * There is deliberately no "transition" schema here. An incident's lifecycle is driven by
+ * named edges, not by a client-supplied target state (`docs/23` §4, `docs/11` §9):
+ * **assignment** is the `NEW → IN_PROGRESS` edge, `/resolve` is `IN_PROGRESS → RESOLVED`,
+ * `/close` is `RESOLVED → CLOSED` and `/reopen` is `RESOLVED/CLOSED → IN_PROGRESS`. A
+ * schema for an endpoint that does not exist only invites someone to build against it.
+ */
 export const reopenIncidentSchema = z
   .object({ reason: z.string().trim().max(2000).optional() })
   .strict();

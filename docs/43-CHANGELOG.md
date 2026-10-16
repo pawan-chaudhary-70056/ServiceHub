@@ -36,6 +36,315 @@ Notes:    what changed and, where non-obvious, why. Include a **Supersedes** lin
 
 ## 3. Documentation Changelog
 
+### 2026-10-16 — Phase 3 increment 35: the landing page becomes a dashboard, and platform administration becomes a data table
+- **Type:** Feature / Docs
+- **Refs:** `16`, `30` §3.1/§3.3, `07` §3, `04` §13, `11` §6, `ADR-0012`, `41`
+- **Affects:** `43`; frontend `src/pages/home.page.tsx`, `src/pages/home.page.test.tsx`,
+  `src/pages/superadmin.page.tsx`, `src/pages/superadmin.page.test.tsx` (new)
+- **Notes:**
+  - **The landing page now shows the caller's actual work.** "Waiting on you" reads four
+    metrics from the reporting surface (`requests.summary`, `incidents.summary`,
+    `tasks.summary`, `approvals.turnaround`) — scoped to the caller, cached for 60 s and
+    invalidated on write (`30` §3.4) — so the front page carries the same figures the
+    reports screen does, and none that no screen computed. A caller without `report:read`
+    sees no strip rather than a denied one, and each tile appears only for an area the
+    caller may open. A tile whose metric lacks the shape it reads renders `—`, never a
+    plausible zero.
+  - **The hero is a real header, not a placeholder**: a primary action (`Go to my work` /
+    `Sign in`) and a secondary one, with the API status and its dependency checks inline
+    where a visitor sees them before hunting for them. The eight areas and five shared
+    surfaces became cards that say what each area *does*, not only where it lives; the
+    availability semantics are unchanged (`07` §3): shown as `No access`, never hidden.
+  - **Platform administration is now a table with counters, not a list.** Counters read
+    the rows the server actually returned (organizations loaded / active / suspended,
+    operators), the roster is cursor-paginated (`11` §6) behind a "Load more" control, and
+    each row carries the slug, time zone and creation date. Every action refetches what it
+    changed. Nothing on this page summarises tenant data — an operator has no access to
+    tenant data by design (`07` §5), so a dashboard showing tenant counts would be either
+    a lie or a leak.
+  - **Verification:** frontend `159` tests / `38` files (`tsc`, ESLint, Prettier clean).
+    Both screens were driven in a real browser against the live API: the tenant admin's
+    landing page showed live counts (3 open requests, 1 open incident, 2 tasks, 1 pending
+    decision) matching the API's own figures; `/superadmin` as a tenant admin rendered
+    `Access denied` and issued **zero** platform calls; as the platform operator the
+    counters, table, provision, suspend and reactivate all worked end to end.
+
+### 2026-10-16 — Phase 3 increment 34: the landing page tells the truth about what is built, and the SPA's base path is checked rather than assumed
+- **Type:** Fix / Docs
+- **Refs:** `11` §1/§9, `14`, `16`, `07` §3, `23` §4, `34` §6
+- **Affects:** `43`; frontend `src/pages/home.page.tsx`, `src/pages/home.page.test.tsx` (new),
+  `src/components/app-shell.tsx`, `src/api/client.test.ts`; backend
+  `src/validators/incident.validators.ts`
+- **Notes:**
+  - **The landing page was still the scaffold placeholder.** It listed the eight functional
+    areas as bare `docs/NN` references under the sentence "Each area is specified in its
+    owning document and is implemented once that document is approved at the phase gate".
+    Every one of those areas is built and mounted, so the page understated the product and
+    offered no route to any screen. It now links each area to the screen that serves it
+    (`/catalog`, `/requests`, `/incidents`, `/tasks`, `/admin/sla`, `/approvals`, `/kb`,
+    `/assets`), states availability **per caller** — Available / No access / Sign in, an
+    area the caller cannot open being shown as such rather than hidden (`07` §3) — and
+    lists the cross-cutting surfaces (notifications, search, reporting, audit,
+    integrations). The same placeholder claim was removed from the shell footer. A
+    landing page that lists a feature as forthcoming, or hides one that is missing, is a
+    statement about the build; both are now derived from the code rather than asserted.
+  - **A misconfigured base path was presenting itself as an outage.** `frontend/.env`
+    carried `VITE_API_BASE_URL=/api`, so every SPA call went to a path the API does not
+    mount: `/api/health/ready` → `404`, which the shell can only render as "API
+    unreachable" — while `/api/v1/health/ready` on the same backend answered `200` with
+    both dependencies `up`. The value is corrected to `/api/v1`, the path version `11` §1
+    fixes, and `client.test.ts` now asserts the configured base path ends with that prefix:
+    the guard fails on `/api` and passes on `/api/v1`, so a one-line misconfiguration is
+    caught by a test instead of being diagnosed from a red badge.
+  - **`transitionIncidentSchema` is removed.** The schema described a
+    `POST /incidents/{id}/transition`-shaped endpoint that does not exist, and must not:
+    an incident's edges are **named** (`23` §4, `11` §9) — assignment is the
+    `NEW → IN_PROGRESS` edge, then `/resolve`, `/close` and `/reopen` — so no route and no
+    test referenced it. A validator with no endpoint invites someone to build against it;
+    the module now records why there is none.
+  - **Verification:** backend `410` tests / `45` files and frontend `154` tests / `37` files,
+    with `tsc --noEmit`, ESLint and Prettier clean in both trees. The landing-page links and
+    the access labels are asserted by the new page test; the base-path guard was confirmed
+    to fail under the wrong value before being kept.
+
+### 2026-10-16 — Phase 3 increment 33: the duration metrics, the `30` §3.4 dashboard cache, and two concurrency criteria verified (`22` §14 AC4, `26` §14 AC5)
+- **Type:** Feature / Performance / Docs
+- **Refs:** `30` §3.1/§3.3/§3.4, `22` §3/§14 AC4, `23` §4/§13, `26` §5/§14 AC5, `25` §4/§9,
+  `33` §4/§5.1, `11` §9, `40` §7, `41`
+- **Affects:** `11`, `33`, `40`, `43`; backend `src/models/report.model.ts`,
+  `src/services/report.service.ts`, `src/services/report-cache.ts` (new),
+  `src/services/{request,incident,task,approval,sla,sla-sweep}.service.ts`,
+  `src/config/env.ts`, `src/models/db.ts`, `.env.example`; tests `tests/setup.ts`,
+  `tests/search.integration.test.ts`, `tests/requests.integration.test.ts`,
+  `tests/approvals.integration.test.ts`; frontend `src/pages/reports.page.tsx`
+- **Notes:**
+  - **The three duration metrics of `30` §3.3 now exist**, each with its owner document's
+    honesty rule attached. `requests.resolution` (owner `22`) reports mean and median from
+    `submittedAt` to `resolvedAt` as **working time per `25`** — every sample measured
+    through its own policy's calendar, DST-correct — and carries the raw **elapsed** pair
+    beside it as the reproducibility anchor (`30` §3.2 R1) plus the calendars actually used
+    (`ADR-0008`: figures measured on different calendars are not comparable).
+    `incidents.mttr` (owner `23`) is **reopen-aware**: a reopen clears `resolvedAt`, so each
+    incident measures to its *latest* resolution — full report-to-final-resolution time —
+    with the reopen count and rate beside it, because an MTTR that hides a reopen loop is
+    the figure that gets trusted past its usefulness. `approvals.turnaround` (owner `26`)
+    measures step-raised to decision and reports the undecided backlog (`PENDING` and
+    `ACTIVE` both count) as a snapshot at generation time, like `tasks.workload` — a period
+    window over "waiting right now" would report decided steps as still open.
+  - **A median has no SQL aggregate and working time cannot be expressed as one**, so these
+    three fetch their *samples* — one row of stored timestamps each, under the caller's
+    scope — and summarise them in the application. That is deliberate and documented in
+    `report.model.ts`; counts and shares stay aggregated in the database (`§3.4`), and a
+    large period goes through the async export path (`R4`) rather than a wider scan.
+  - **`30` §3.4's dashboard cache is implemented, per class.** `report-cache.ts` mirrors the
+    catalogue cache's proven shape — a per-tenant **generation counter** per region, so
+    invalidation is O(1) and cannot race with a reader, and entries become unreachable at
+    once and expire on their own TTL — with five regions (`requests`, `incidents`, `tasks`,
+    `sla`, `approvals`) and one short TTL (`REPORT_CACHE_TTL_SECONDS`, 60 s). The cached
+    payload is the finished `ReportResult`, and the key carries the **metric, the period and
+    the caller's scope**, so a hit is always *this* caller's answer to *this* question
+    (`R2`/`R3`) and a shared entry can never serve one caller's figures to another.
+  - **Invalidation runs after the commit, at every mutation of a cached class** — request
+    create/transition/assign, incident create/update/assign/resolve/close/reopen/major,
+    task create/update/assign/transition, approval decision/reassignment/cancellation, and
+    the SLA clock override. The sweep stamps breaches from a worker rather than a request,
+    so it invalidates the SLA region explicitly, once per tenant per run. A write that
+    touches two classes names both: fulfilling a request moves the request figures *and*
+    stops its clock.
+  - **`notifications.delivery` is deliberately *not* cached.** Its writes come from the
+    outbox drain (`29` §3), which runs continuously, so "invalidate on write of that class"
+    would evict the entry as fast as the worker refilled it; it stays a live indexed
+    aggregate, and the reason is recorded in the code rather than left to be rediscovered.
+  - **`22` §14 AC4 and `26` §14 AC5 are now verified tests, and the first one found a real
+    defect.** 500 concurrent creates produce 500 distinct references — and 500 clocks —
+    proving the atomic counter and the `(organizationId, reference)` unique index hold under
+    a burst. Two concurrent decisions on the same step produce exactly **one** advance: the
+    step is claimed atomically, one caller gets `200`, the other `409`, and the losing
+    decision is not recorded at all.
+  - **The `AC4` test exposed a self-inflicted outage, not a test flake.** Under 500 parallel
+    creates the requests failed with `P2028 "Unable to start a transaction in the given
+    time"` **before any reference was allocated**: Prisma's default transaction `maxWait` is
+    2 s, so a burst the pool would have served was instead dropped wholesale. `33` §4 already
+    requires timeouts to be explicit and bounded, so the client now sets
+    `DB_TRANSACTION_MAX_WAIT_MS` (10 s) and `DB_TRANSACTION_TIMEOUT_MS` (15 s) rather than
+    inheriting library defaults — the pool's job is to bound concurrency, not to discard work
+    (`.env.example`, `models/db.ts`).
+  - **The reports page renders all three** (`requests.resolution` shows working and elapsed
+    minutes and the calendar table; `incidents.mttr` shows the reopen-aware average with its
+    reopen rate; `approvals.turnaround` shows turnaround with the backlog snapshot), so the
+    new figures are reachable without an export.
+  - **Verified:** `npm run typecheck`, `npm run lint`, `prettier --check` and the full suites
+    on both trees — backend **410 tests / 45 files** (390 / 44 before), frontend **149 tests /
+    36 files** (146 before), all passing, against a real PostgreSQL instance. New coverage: the
+    three metric tests, two cache tests (identical second read, per-class invalidation on a
+    write in the same class, *no* invalidation from a write in another class, scope-separated
+    entries, and the SLA region after an override), the two concurrency tests above, and a
+    frontend test that each of the three new metrics renders the figures it is defined by.
+
+### 2026-10-15 — Phase 3 increment 32: the SLA clock becomes a surface — read, override and indicator (`25` §11/§12, `22` §14 AC5)
+- **Type:** Feature / Docs
+- **Refs:** `25` §11/§12/§6/§14 AC6 and AC8, `22` §14 AC5, `23` §11, `11` §9, `07` §1, `17`, `40` §7/§12, `41`
+- **Affects:** `40`, `43`; backend `src/models/sla.model.ts`, `src/services/sla-clock.service.ts`,
+  `src/services/sla.service.ts`, `src/services/request.service.ts`, `src/services/incident.service.ts`,
+  `src/services/audit-events.ts`, `src/services/index.ts`, `src/validators/sla.validators.ts`,
+  `src/controllers/sla.controller.ts`, `src/routes/sla.routes.ts`; tests
+  `tests/sla-clock.integration.test.ts` (new); frontend `src/api/sla.api.ts`,
+  `src/api/requests.api.ts`, `src/api/incidents.api.ts`, `src/utils/sla.ts` (new),
+  `src/components/sla-indicator.tsx` (new), `src/components/sla-override-form.tsx` (new),
+  `src/pages/sla.page.tsx` (new), `src/pages/requests.page.tsx`, `src/pages/incidents.page.tsx`,
+  `src/pages/request-detail.page.tsx`, `src/pages/incident-detail.page.tsx`, `src/routes/index.tsx`,
+  `src/components/app-shell.tsx`; tests `src/utils/sla.test.ts` (new),
+  `src/components/sla-indicator.test.tsx` (new), `src/components/sla-override-form.test.tsx` (new),
+  `src/pages/sla.page.test.tsx` (new), `src/pages/requests.page.test.tsx`
+- **Notes:**
+  - **The clock had been written, swept and paused for a long time without ever being
+    readable.** `startClock`, `pauseClockIfPolicy`, `resumeClock` and the sweep all touched
+    `sla_clocks`, but no response ever carried it: the only SLA information an API returned was
+    the policy's *name*. So `25` §12's "state plus **time remaining** — a state without a number
+    is not actionable" had no implementation, `25` §11's `/sla/clocks/...` endpoints did not
+    exist, and `22` §14 AC5 ("SLA state is visible in the list without opening the record")
+    could not be met by any client.
+  - **`GET /sla/clocks/{id}` and `POST /sla/clocks/{id}/override` now exist.** The read is
+    scoped to the record the clock belongs to — same tenant, same object-level rule, `NOT_FOUND`
+    rather than `FORBIDDEN` — so it is usable by an agent looking at their own queue and useless
+    as a way to probe for record ids. The override requires a reason, requires at least one
+    effect (move the target, clear the breach, or both), keeps the warn threshold's *margin*
+    from the target rather than its absolute instant, and writes `sla.clock.override` with the
+    before and after instants and the reason (`25` §14 AC8). Clearing a breach is its own
+    explicit request and never erases that the breach happened — the audit before-state keeps
+    it (`25` §6, AC6).
+  - **`sla:clock:override` was declared and enforced nowhere.** The permission existed in the
+    catalogue, granted to `TEAM_LEAD` and `ADMINISTRATOR`, with no endpoint behind it. It is
+    now enforced at the route **and** re-checked in the service against the resolved record,
+    because the route guard is only stage 1 of `07` §1.
+  - **Every response that returns a request or an incident now carries the live clock**, not
+    just the detail read: a transition response that omitted it would leave the countdown on
+    screen disagreeing with the record after the very action that changed it (fulfilment stops
+    the clock; entering an approval may pause it). The list read batches one query for the whole
+    page — the `@@index([organizationId, entityType, entityId])` exists for exactly this — so an
+    indicator per row is not an N+1 (`33` §7).
+  - **`state` is derived from the stored timestamps at read time, not read from the column.**
+    The column is the sweep's cache and is stale by up to one interval; a countdown that
+    disagreed with its own badge would be worse than no countdown, and `25` §5 makes the
+    derivation authoritative.
+  - **The frontend gained the surface, not a stub.** `sla-indicator.tsx` renders state *and*
+    time remaining and reads its colours from the shared `SLA_STATE_TONE` map that had been
+    defined in `themes/tokens.ts` but used by nothing; it is wired into the request and incident
+    **lists** and both detail headers. `sla-override-form.tsx` exposes the override to a caller
+    holding the permission, with the reason required in the form as well as the API. A new
+    `/admin/sla` page (guarded by `sla:policy:manage`, linked in the nav) administers the policy
+    target matrix by priority and creates business calendars with working windows and holidays.
+  - **A holiday is validated in the form** because an unparseable date reaching a calendar
+    would silently contribute working time that should have been closed, and a policy cannot be
+    submitted without a calendar or without all four priority targets.
+  - **Still open on this line:** `PATCH /sla/calendars/{id}` does not exist, so a calendar
+    change is expressed as a new calendar rather than a new *version* of the same one
+    (`25` §4 rule 6). Clock arithmetic, freezing and sweeps were already complete and are
+    unchanged.
+  - **Verified:** `npm run typecheck` and `npm run lint` on both trees, and the full suites —
+    backend **390 tests / 44 files** (379 before), frontend **146 tests / 36 files** (125
+    before), all passing. New coverage: 11 backend integration tests (creation-time projection,
+    list projection, scoped read, permission and reason refusals, object-scope refusal at the
+    service level, target move with the warn margin preserved, audited override, breach clearing
+    with the before-state retained, clock dropped at fulfilment, incident projection, tenant
+    predicate) and 21 frontend tests (countdown formatter, indicator states and accessible
+    names, override form gating and error surfacing, the admin page's matrix submission and
+    holiday validation, and the SLA state rendering in the request list).
+
+### 2026-10-12 — Phase 3 increment 31: M4's two remaining integrations close — provider delivery webhooks (`29` N8) and the asynchronous antivirus scan step (`19` §7.2)
+- **Type:** Feature / Docs
+- **Refs:** `29` N8, `19` §7.2 step 7 / rule 1, `32` §5/§8/§9, `40` §7, `41`
+- **Affects:** `40`, `43`; backend `src/services/notification-provider-webhooks.ts` (new),
+  `src/services/attachment-scan.service.ts` (new), `src/services/attachment-scan-scheduler.ts`
+  (new), `src/integrations/antivirus.ts` (new), `src/integrations/storage.ts`,
+  `src/models/notification.model.ts`, `src/models/attachment.model.ts`,
+  `src/services/attachment.service.ts`, `src/services/integration-config.service.ts`,
+  `src/config/env.ts`, `src/services/index.ts`, `src/server.ts`, `src/worker.ts`,
+  `.env.example`; `ops/observability/prometheus/alerts.yml`,
+  `ops/observability/README.md`; tests `tests/inbound-webhooks.integration.test.ts`,
+  `tests/antivirus-adapter.test.ts` (new), `tests/attachment-scan.integration.test.ts` (new),
+  `tests/integration-config.integration.test.ts`
+- **Notes:**
+  - **These were the last two items on M4's `integrations` line** (`40` §7, increment 29's
+    closing list). Increment 26 delivered the reliability patterns and the `admin:config`
+    surface; this closes what it named as remaining.
+  - **`29` N8 — provider webhooks now move the notification record.** "Delivery is not
+    'sent', it is 'delivered'." `email.delivered` sets `DELIVERED` and stamps
+    `deliveredAt`; `email.bounced` and `email.complained` set **`DEAD`, not `FAILED`** —
+    `FAILED` is non-terminal for the outbox drain, so a bounced address would have been
+    mailed again on every sweep. Correlation is on the vendor message id the send path
+    already stores (`integrations/index.ts`); the payload is validated with Zod through a
+    tolerant key/nesting alias list, because the signature proves origin, never shape
+    (`32` §5, `§18`). An event for a message this environment never sent is a **no-op**, so
+    a stale delivery cannot dead-letter an endpoint forever; an event with no message id
+    **fails** so it is visible and retryable rather than acknowledged as applied. Handlers
+    are registered explicitly by both entrypoints — not by being imported.
+  - **`19` §7.2 step 7 — the scan step is now real and, more importantly, fail-closed.**
+    With `ANTIVIRUS_URL` set an upload lands `PENDING` and only the scan worker makes it
+    retrievable; the verdict maps `CLEAN` → `AVAILABLE`, `INFECTED` → `QUARANTINED`, and
+    **`UNAVAILABLE` → still `PENDING`**. That last mapping is the point: promoting on a
+    timeout would turn a scanner outage into a silent bypass of the pipeline's only malware
+    control. Unset (development, tests) means no scanner and the previous promote-on-upload
+    behaviour, so nothing became unretrievable — and the response carries whichever status
+    the database actually holds.
+  - **Two supporting changes were unavoidable.** `FileStorage.get()` was added, because a
+    scanner cannot read a path the backend does not have (`19` §7.1) — the S3 driver reuses
+    its existing presigned-GET, so no new signing code. And the scan adapter takes its URL
+    as a parameter rather than reading frozen `config` inside the call, which is what makes
+    every verdict mapping reachable in a test.
+  - **`antivirus` joined the integration catalogue** (`admin:config`), so an administrator can
+    see whether the scan step is in force rather than assuming it. The catalogue's exact-keys
+    assertion was extended, not relaxed.
+  - **The observability assets were updated with the new worker, deliberately not by adding an
+    alert.** `attachment_scan` is a no-op without a scanner, so a stall rule for it would warn
+    permanently in a valid stack — the same reasoning that already excludes `roster_sync` — and
+    the exclusion plus the condition for reversing it are both recorded (`alerts.yml`, README).
+    Failures are covered either way by `ServiceHubJobFailing`.
+  - **Verified:** `npm run typecheck`, `npm run lint`, and the full suite — **379 tests, 43
+    files, all passing** (360 before). New coverage: 6 provider-webhook cases in the existing
+    inbound integration file (delivery, bounce, complaint, redelivery, unknown message,
+    malformed payload), 8 adapter cases including timeout/refusal/unexpected status, and 5
+    scan-worker cases against real Postgres and real local object storage.
+
+### 2026-10-11 — Fix: process entrypoints and CLIs did not read `backend/.env`
+- **Type:** Fix / Docs
+- **Refs:** `35` §2/§7, `10` §8, `40` §12, `43`, `README`
+- **Affects:** `43`, `backend/README.md`; backend `src/config/load-env.ts` (new),
+  `src/server.ts`, `src/worker.ts`, `prisma/seed.ts`, `prisma/bootstrap-platform-operator.ts`,
+  `prisma/reset-operator-password.ts`; tests `tests/load-env.test.ts`
+- **Notes:**
+  - **Reported in use, and it made the application look broken.** `npm run start:worker`
+    failed at boot with `DATABASE_URL: Required / CORS_ORIGIN: Required / AUTH_SECRET:
+    Required` on a machine whose `backend/.env` was correct. The cause was not the worker:
+    **no process entrypoint read `.env` at all.** Only the Prisma CLI loads it (so `prisma
+    migrate` worked), while `npm run dev`, `npm start`, `npm run dev:worker`,
+    `npm run start:worker`, `npm run prisma:seed` and `npm run bootstrap:operator` all
+    required every variable to be exported by hand — even though the README's own quick
+    start is `cp .env.example .env` then `npm run dev`. A documented workflow that could not
+    work is a defect in the code path or the doc; the entries were fixed, because the
+    documented workflow is the right one.
+  - **`src/config/load-env.ts` loads it once, for everything.** It is a side-effect import
+    placed **first** in `server.ts` and `worker.ts` (and in the operational CLIs), so it runs
+    before `./config` validates the environment at import time. Two rules keep it from being
+    a new footgun, both pinned by tests: **an injected environment always wins** —
+    `process.loadEnvFile` does not overwrite a variable that is already set — and **a missing
+    file is a normal no-op**, since a deployed container has no `.env`. A *malformed* file is
+    deliberately not swallowed, so it is reported rather than surfacing later as a confusing
+    validation error.
+  - **The emitted ordering is load-bearing and was checked in the build output**, not
+    assumed: `require("./config/load-env")` is the first `require` in `dist/worker.js`, ahead
+    of `require("./config")`.
+  - **Verified by reproducing the failure and then the fix, with nothing exported.**
+    `env -u DATABASE_URL -u CORS_ORIGIN -u AUTH_SECRET npm run start:worker` now starts and
+    logs its banner; `npm start` likewise, listening on the file's port; `PORT=4999 npm start`
+    reports `"port":4999`, which is the proof that the injected value beat the file's `4000`;
+    `npm run bootstrap:operator` reaches the database and reports its guarded no-op with no
+    variables exported at all. The role guards still refuse (`PROCESS_ROLE=api node
+    dist/worker.js` → exit 1; `PROCESS_ROLE=worker npm start` → exit 1) — note that an
+    exported `PROCESS_ROLE` is masked by the `PROCESS_ROLE=worker` prefix inside the
+    `start:worker` script, so that guard is only reachable by invoking the entrypoint
+    directly, which is how it was tested.
+
 ### 2026-10-11 — Operator password recovery: a guarded, audited reset command
 - **Type:** Feature / Process
 - **Refs:** `10` §8, `06` §4/§6/§7, `31` §3.1, `33` C3, `17`, `43`

@@ -24,6 +24,7 @@ export const AUDIT_ACTION = {
   CATALOG_ITEM_ACTIVATE: 'catalog.item.activate',
   CATALOG_ITEM_RETIRE: 'catalog.item.retire',
   SLA_CALENDAR_CREATE: 'sla.calendar.create',
+  SLA_CALENDAR_UPDATE: 'sla.calendar.update',
   SLA_POLICY_CREATE: 'sla.policy.create',
   SLA_POLICY_UPDATE: 'sla.policy.update',
   REQUEST_CREATE: 'request.create',
@@ -49,6 +50,10 @@ export const AUDIT_ACTION = {
   TASK_OVERRIDE: 'task.rollup.override',
   SLA_AT_RISK: 'sla.clock.at_risk',
   SLA_BREACH: 'sla.clock.breach',
+  // Moving a frozen target or clearing a breach is a correction to the SLA record itself,
+  // and docs/25 §14 AC8 requires every override — including breach clearing — to be in the
+  // audit trail. The reason is mandatory and stored on the entry.
+  SLA_CLOCK_OVERRIDE: 'sla.clock.override',
   APPROVAL_TEMPLATE_CREATE: 'approval.template.create',
   APPROVAL_REQUESTED: 'approval.requested',
   APPROVAL_DECISION: 'approval.decision',

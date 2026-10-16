@@ -16,6 +16,8 @@ import { ApprovalsPanel } from '../components/approvals-panel';
 import { AttachmentPanel } from '../components/attachment-panel';
 import { KnowledgePanel } from '../components/knowledge-panel';
 import { RecordHistoryPanel } from '../components/record-history-panel';
+import { SlaIndicator } from '../components/sla-indicator';
+import { SlaOverrideForm } from '../components/sla-override-form';
 import { StatusBadge } from '../components/status-badge';
 import { TasksPanel } from '../components/tasks-panel';
 import { useAuth } from '../hooks/auth-context';
@@ -137,6 +139,9 @@ export function RequestDetailPage() {
             </h1>
           </div>
           <div className="flex items-center gap-2">
+            {/* docs/25 §12: the detail header carries the SLA state and the time remaining,
+                because a state without a number is not actionable. */}
+            <SlaIndicator sla={data.sla} />
             <StatusBadge tone={priorityTone(data.priority)}>{data.priority}</StatusBadge>
             <StatusBadge tone={statusTone(data.status)}>{data.status}</StatusBadge>
           </div>
@@ -164,7 +169,22 @@ export function RequestDetailPage() {
           <Fact label="Assignee" value={data.assignee?.displayName ?? 'Unassigned'} />
           <Fact label="Team" value={data.team?.name ?? '—'} />
           <Fact label="SLA policy" value={data.slaPolicy.name} />
+          {/* The target instant, so the countdown in the header can be checked against the
+              policy arithmetic rather than trusted blindly (docs/25 §12). */}
+          <Fact
+            label="SLA target"
+            value={data.sla ? new Date(data.sla.targetAt).toLocaleString() : 'No live clock'}
+          />
         </dl>
+
+        {/* The only way a deadline moves by hand (docs/25 §11): shown to a caller the server
+            would accept, with the reason mandatory and recorded alongside the before and
+            after instants. */}
+        {data.sla && hasPermission('sla:clock:override') && (
+          <div className="mt-4 border-t border-border pt-4">
+            <SlaOverrideForm clock={data.sla} onOverridden={refresh} />
+          </div>
+        )}
 
         {data.fields.length > 0 && (
           <dl className="mt-4 grid gap-3 border-t border-border pt-4 sm:grid-cols-2">
@@ -199,6 +219,19 @@ export function RequestDetailPage() {
                 onClick={() => transition.mutate({ to: 'TRIAGED' })}
               />
             )}
+            {/* The approval workflow is instantiated **on entry to `APPROVAL_PENDING`**
+                (`approval.service.ts`), and `TRIAGED → APPROVAL_PENDING` is the only edge
+                that starts it. Without this control a service that requires approval
+                produces requests nothing can ever approve, so the action is part of the
+                lifecycle, not an optional extra. It is offered only when the catalog item
+                declares the requirement; the server re-checks and rejects it otherwise
+                (`request.service.ts`). */}
+            {canWork && data.status === 'TRIAGED' && data.catalogItem.requiresApproval && (
+              <ActionButton
+                label="Send for approval"
+                onClick={() => transition.mutate({ to: 'APPROVAL_PENDING' })}
+              />
+            )}
             {canWork &&
               (data.status === 'TRIAGED' || data.status === 'APPROVED') &&
               data.assignee && (
@@ -228,10 +261,14 @@ export function RequestDetailPage() {
                 else cancel.mutate(note);
               }}
             >
-              <label className="block text-sm font-medium text-content">
+              {/* `htmlFor`/`id` rather than a wrapping label: this label is a sibling of
+                  its control, and without the association the textarea has no accessible
+                  name at all (docs/16 §accessibility). */}
+              <label htmlFor="transition-note" className="block text-sm font-medium text-content">
                 {pending === 'FULFILL' ? 'Fulfilment note (required)' : 'Reason (optional)'}
               </label>
               <textarea
+                id="transition-note"
                 value={note}
                 onChange={(event) => setNote(event.target.value)}
                 rows={2}

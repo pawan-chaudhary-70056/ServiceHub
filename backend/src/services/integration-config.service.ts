@@ -1,5 +1,6 @@
 import { config } from '../config';
 import { assertPermission, type Principal } from '../helpers/authorization';
+import { isAntivirusConfigured } from '../integrations/antivirus';
 import { emailAdapter } from '../integrations/email';
 import { unsupportedEmailAdapter } from '../integrations';
 import { directoryAdapter, unsupportedDirectoryAdapter } from '../integrations/directory';
@@ -116,6 +117,17 @@ export const INTEGRATION_CATALOGUE: readonly IntegrationCatalogueEntry[] = [
     credentialRefExample: 'env:UNUSED',
   },
   {
+    key: 'antivirus',
+    name: 'Antivirus scanning',
+    description:
+      'Asynchronous malware scan of uploaded files (docs/19 §7.2). A file is not retrievable until it clears the scan; with no scanner configured the upload is promoted on the request path and only the content sniff has run.',
+    direction: 'outbound',
+    testable: true,
+    usesCredential: false,
+    defaultConfig: { ...DEFAULTS, timeoutMs: 15_000 },
+    credentialRefExample: 'env:UNUSED',
+  },
+  {
     key: 'inbound_webhooks',
     name: 'Inbound webhooks',
     description:
@@ -168,6 +180,10 @@ function mergeConfig(stored: unknown): Required<IntegrationReliabilityConfig> {
 function credentialConfigured(key: string): boolean {
   if (key === 'email') return emailAdapter !== unsupportedEmailAdapter;
   if (key === 'directory') return directoryAdapter !== unsupportedDirectoryAdapter;
+  // The scanner is configured by its URL, not by a credential: an unset `ANTIVIRUS_URL`
+  // means the scan step is not in force, and the connectivity test should say so rather
+  // than report a green light for a step that never runs.
+  if (key === 'antivirus') return isAntivirusConfigured();
   return true;
 }
 

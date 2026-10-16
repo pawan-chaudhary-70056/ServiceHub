@@ -21,11 +21,14 @@ import { StatusBadge } from '../components/status-badge';
 
 const METRICS = [
   { key: 'requests.summary', label: 'Requests' },
+  { key: 'requests.resolution', label: 'Request resolution' },
   { key: 'incidents.summary', label: 'Incidents' },
+  { key: 'incidents.mttr', label: 'Incident MTTR' },
   { key: 'tasks.summary', label: 'Tasks' },
   { key: 'tasks.workload', label: 'Task workload' },
   { key: 'sla.attainment', label: 'SLA attainment' },
   { key: 'notifications.delivery', label: 'Notification delivery' },
+  { key: 'approvals.turnaround', label: 'Approval turnaround' },
 ] as const;
 
 function isoDaysAgo(days: number): string {
@@ -266,6 +269,66 @@ function ReportFigures({ metric, figures }: { metric: string; figures: Record<st
     );
   }
 
+  if (metric === 'requests.resolution') {
+    return (
+      <div className="space-y-4">
+        <dl className="grid gap-4 sm:grid-cols-4">
+          <Figure label="Resolved" value={figures.resolvedCount} />
+          <Figure label="Mean (working)" value={formatMinutes(figures.meanMinutes)} />
+          <Figure label="Median (working)" value={formatMinutes(figures.medianMinutes)} />
+          <Figure label="Mean elapsed" value={formatMinutes(figures.meanElapsedMinutes)} />
+          <Figure label="Median elapsed" value={formatMinutes(figures.medianElapsedMinutes)} />
+        </dl>
+        <p className="max-w-3xl text-sm text-content-muted">
+          Working minutes are measured through each request's own SLA calendar, holidays and time
+          zone excluded; elapsed minutes are the raw stored timestamps and never move. Calendars
+          actually used are listed, because figures measured on different calendars are not
+          comparable (ADR-0008).
+        </p>
+        <CountTable title="Calendars used" counts={figures.calendarsUsed} />
+      </div>
+    );
+  }
+
+  if (metric === 'incidents.mttr') {
+    return (
+      <div className="space-y-4">
+        <dl className="grid gap-4 sm:grid-cols-4">
+          <Figure label="Resolved" value={figures.resolvedCount} />
+          <Figure label="Mean time to resolve" value={formatMinutes(figures.meanMinutes)} />
+          <Figure label="Median time to resolve" value={formatMinutes(figures.medianMinutes)} />
+          <Figure label="Major incidents" value={figures.majorCount} />
+          <Figure label="Reopened" value={figures.reopenedCount} />
+          <Figure label="Reopen rate" value={formatPercent(figures.reopenRatePercent)} />
+        </dl>
+        <p className="max-w-3xl text-sm text-content-muted">
+          A reopened incident measures to its latest resolution, so the whole
+          report-to-final-resolution time counts — the reopen rate beside it says how much of the
+          average that represents.
+        </p>
+      </div>
+    );
+  }
+
+  if (metric === 'approvals.turnaround') {
+    return (
+      <div className="space-y-4">
+        <dl className="grid gap-4 sm:grid-cols-4">
+          <Figure label="Decisions" value={figures.decisionCount} />
+          <Figure label="Mean turnaround" value={formatMinutes(figures.meanMinutes)} />
+          <Figure label="Median turnaround" value={formatMinutes(figures.medianMinutes)} />
+          <Figure label="Awaiting decision" value={figures.pending} />
+          <Figure label="Past deadline" value={figures.overdue} />
+        </dl>
+        <p className="max-w-3xl text-sm text-content-muted">
+          Turnaround is measured from the step being raised to the decision. The backlog is a
+          snapshot at the moment the report ran, not a figure over the period — how much is waiting
+          right now is the question it answers.
+        </p>
+      </div>
+    );
+  }
+
   if (metric === 'incidents.summary') {
     return (
       <div className="space-y-4">
@@ -327,6 +390,12 @@ function formatValue(value: unknown): string {
 function formatPercent(value: unknown): string {
   if (value === null || value === undefined) return '—';
   return `${String(value)}%`;
+}
+
+/** Durations arrive in minutes (one decimal); an em dash for the empty-set case. */
+function formatMinutes(value: unknown): string {
+  if (value === null || value === undefined) return '—';
+  return `${String(value)} min`;
 }
 
 function messageFor(error: unknown): string {

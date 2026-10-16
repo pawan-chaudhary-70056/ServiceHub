@@ -38,6 +38,7 @@ const durations = new Map<string, DurationSeries>();
 const jobRuns = new Map<string, number>();
 const jobLastSuccess = new Map<string, number>();
 const jobLastFailure = new Map<string, number>();
+const cacheOperations = new Map<string, number>();
 
 const PROCESS_STARTED_AT = Date.now();
 
@@ -109,6 +110,18 @@ export function recordJobRun(job: string, success: boolean, at: Date = new Date(
   } else {
     jobLastFailure.set(job, seconds);
   }
+}
+
+/**
+ * Records one cache operation (`docs/33` C8: hit/miss is measured per region, so code
+ * that looks cached but never serves a hit is visible rather than assumed). The region
+ * set is fixed and low-cardinality, like every other label here.
+ */
+export type CacheOutcome = 'hit' | 'miss' | 'invalidation';
+
+export function recordCacheOperation(region: string, outcome: CacheOutcome): void {
+  const key = `${region}|${outcome}`;
+  cacheOperations.set(key, (cacheOperations.get(key) ?? 0) + 1);
 }
 
 /** Escapes a label value per the Prometheus text format. */
@@ -196,6 +209,19 @@ export function renderMetrics(): string {
     );
   }
 
+  lines(
+    out,
+    'servicehub_cache_operations_total',
+    'counter',
+    'Cache hits, misses and invalidations by region (docs/33 C8).',
+  );
+  for (const [key, value] of [...cacheOperations.entries()].sort()) {
+    const [region, outcome] = key.split('|') as [string, string];
+    out.push(
+      `servicehub_cache_operations_total{region="${labelValue(region)}",outcome="${outcome}"} ${value}`,
+    );
+  }
+
   const now = Date.now();
   lines(out, 'servicehub_process_start_time_seconds', 'gauge', 'Unix time the process started.');
   out.push(`servicehub_process_start_time_seconds ${PROCESS_STARTED_AT / 1000}`);
@@ -265,4 +291,5 @@ export function resetMetrics(): void {
   jobRuns.clear();
   jobLastSuccess.clear();
   jobLastFailure.clear();
+  cacheOperations.clear();
 }

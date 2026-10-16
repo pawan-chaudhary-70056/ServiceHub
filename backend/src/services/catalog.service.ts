@@ -25,6 +25,11 @@ import {
   type CatalogItemWithFields,
 } from '../models';
 import { AUDIT_ACTION, AUDIT_ENTITY } from './audit-events';
+import {
+  catalogRegionTtlSeconds,
+  invalidateCatalogCache,
+  readCatalogRegion,
+} from './catalog-cache';
 import type { RequestMeta } from './context';
 
 /**
@@ -132,20 +137,42 @@ export async function listCategoryTree(
   const canManage = hasPermission(actor, MANAGE_PERMISSION);
   const includeInactive = input.includeInactive && canManage;
 
-  const [categories, counts] = await Promise.all([
-    listCategories(organizationId, { includeInactive }),
-    countActiveItemsByCategory(organizationId),
-  ]);
+  // The region caches the tree **unfiltered** and the viewer's filter is applied after
+  // the read (`docs/21` §10, rule C1): one shared entry per tenant that cannot leak an
+  // inactive category to a requester, because what differs between viewers was never
+  // part of what was cached. The item counts are part of the tree — an item activation
+  // moves them — so they load inside the same region and are invalidated with it.
+  const payload = await readCatalogRegion({
+    region: 'catalog.categories',
+    organizationId,
+    viewKey: 'tree',
+    ttlSeconds: catalogRegionTtlSeconds('catalog.categories'),
+    load: async () => {
+      const [categories, counts] = await Promise.all([
+        listCategories(organizationId, { includeInactive: true }),
+        countActiveItemsByCategory(organizationId),
+      ]);
+      return JSON.stringify({ categories, counts: [...counts] });
+    },
+  });
 
-  return categories.map((category) => ({
-    id: category.id,
-    name: category.name,
-    parentId: category.parentId,
-    description: category.description,
-    displayOrder: category.displayOrder,
-    isActive: category.isActive,
-    itemCount: counts.get(category.id) ?? 0,
-  }));
+  const cached = JSON.parse(payload) as {
+    categories: Array<Omit<Category, 'createdAt' | 'updatedAt'> & { createdAt: string }>;
+    counts: Array<[string, number]>;
+  };
+  const counts = new Map(cached.counts);
+
+  return cached.categories
+    .filter((category) => includeInactive || category.isActive)
+    .map((category) => ({
+      id: category.id,
+      name: category.name,
+      parentId: category.parentId,
+      description: category.description,
+      displayOrder: category.displayOrder,
+      isActive: category.isActive,
+      itemCount: counts.get(category.id) ?? 0,
+    }));
 }
 
 export async function createCategory(
@@ -198,6 +225,11 @@ export async function createCategory(
       tx,
     );
 
+    return category;
+  }).then(async (category) => {
+    // Invalidation runs *after* the commit (C3): doing it inside would let a concurrent
+    // reader repopulate the region from pre-commit data and stay stale until its TTL.
+    await invalidateCatalogCache(organizationId);
     return category;
   });
 }
@@ -257,6 +289,10 @@ export async function updateCategory(
       tx,
     );
     return updated;
+  }).then(async (updated) => {
+    // A rename lands in list rows too (`categoryName`), so both regions move (C3).
+    await invalidateCatalogCache(organizationId);
+    return updated;
   });
 }
 
@@ -272,23 +308,48 @@ export async function listItems(
   const organizationId = requireTenant(actor);
   const canManage = hasPermission(actor, MANAGE_PERMISSION);
 
-  const rows = canManage
-    ? await listCatalogItems({
-        organizationId,
-        status: input.status as CatalogItem['status'] | undefined,
-        categoryId: input.categoryId,
-        limit: input.limit,
-        cursor: input.cursor,
-      })
-    : await listActiveCatalogItems({
-        organizationId,
-        categoryId: input.categoryId,
-        limit: input.limit,
-        cursor: input.cursor,
-      });
+  // C1 by key rather than by filter: a requester's page and a manager's page of the
+  // same filters are different views (status filtering differs), so the viewer class is
+  // part of the key. A shared key here is the classic cache authz leak — it would serve
+  // a manager's draft rows to a requester. Cursor pages are cached individually; the
+  // invalidation is per-region, so any catalog write retires every page at once.
+  const viewKey = [
+    canManage ? 'manager' : 'requester',
+    canManage ? (input.status ?? 'ANY') : 'ACTIVE',
+    input.categoryId ?? 'ANY',
+    String(input.limit),
+    input.cursor ?? 'FIRST',
+  ].join('|');
 
-  const page = buildCursorPage(rows, input.limit, (row) => row.createdAt);
-  return { ...page, items: page.items.map(toSummary) };
+  const payload = await readCatalogRegion({
+    region: 'catalog.items',
+    organizationId,
+    viewKey,
+    ttlSeconds: catalogRegionTtlSeconds('catalog.items'),
+    load: async () => {
+      const rows = canManage
+        ? await listCatalogItems({
+            organizationId,
+            status: input.status as CatalogItem['status'] | undefined,
+            categoryId: input.categoryId,
+            limit: input.limit,
+            cursor: input.cursor,
+          })
+        : await listActiveCatalogItems({
+            organizationId,
+            categoryId: input.categoryId,
+            limit: input.limit,
+            cursor: input.cursor,
+          });
+      const page = buildCursorPage(rows, input.limit, (row) => row.createdAt);
+      return JSON.stringify({ ...page, items: page.items.map(toSummary) });
+    },
+  });
+
+  // The cached and a fresh payload are the same serialised shape by construction: the
+  // loader builds exactly the object a cache miss would have returned, and `createdAt`
+  // crosses every HTTP boundary as the same ISO string either way.
+  return JSON.parse(payload) as CursorPage<CatalogItemSummary>;
 }
 
 export async function getItem(id: string, actor: Principal): Promise<CatalogItemDetail> {
@@ -359,6 +420,8 @@ export async function createItem(
     return created;
   });
 
+  await invalidateCatalogCache(organizationId);
+
   return toDetail((await findCatalogItemById(item.id)) as CatalogItemWithFields);
 }
 
@@ -428,6 +491,8 @@ export async function updateItem(
       tx,
     );
   });
+
+  await invalidateCatalogCache(organizationId);
 
   return toDetail((await findCatalogItemById(id)) as CatalogItemWithFields);
 }
@@ -621,6 +686,9 @@ async function changeItemStatus(
       tx,
     );
   });
+
+  // Status moves between the active list and the requester's catalog (C4).
+  await invalidateCatalogCache(actor.organizationId as string);
 }
 
 function toSummary(row: CatalogItemListRow | CatalogItem): CatalogItemSummary {

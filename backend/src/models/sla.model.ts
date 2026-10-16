@@ -107,6 +107,39 @@ export function countPoliciesUsingCalendar(
   return client.slaPolicy.count({ where: { calendarId } });
 }
 
+/**
+ * Marks a version superseded: the row stays (history resolves against it) but stops
+ * being the current one. Never a delete — policies and historical references keep it
+ * alive, and rule 6 is about *versions*, not rows that vanish.
+ */
+export function supersedeBusinessCalendar(
+  id: string,
+  client: DataClient = prisma,
+): Promise<BusinessCalendar> {
+  return client.businessCalendar.update({ where: { id }, data: { isActive: false } });
+}
+
+/**
+ * Moves every policy from one calendar version to its successor (docs/25 §13: "calendar
+ * edited mid-cycle — in-flight records keep `targetAt`; **new records use the new
+ * version**").
+ *
+ * The policy is the only path from a new record to a calendar, so the move is what makes
+ * the new version actually take effect. It cannot move a deadline: a clock stores its
+ * target instants at start and never re-derives them (`docs/25` §4 example 5), and a
+ * policy's calendar being swapped underneath an in-flight clock is already the documented
+ * behaviour of a policy edit.
+ */
+export function movePoliciesToCalendar(
+  fromCalendarId: string,
+  toCalendarId: string,
+  client: DataClient = prisma,
+): Promise<number> {
+  return client.slaPolicy
+    .updateMany({ where: { calendarId: fromCalendarId }, data: { calendarId: toCalendarId } })
+    .then((result) => result.count);
+}
+
 // ---------------------------------------------------------------------------
 // SLA policies and targets
 // ---------------------------------------------------------------------------
@@ -354,4 +387,49 @@ export function findSlaClockById(
   client: DataClient = prisma,
 ): Promise<SlaClock | null> {
   return client.slaClock.findUnique({ where: { id } });
+}
+
+/**
+ * The live clocks for a set of records, in one query.
+ *
+ * A page of records renders an SLA indicator per row (`docs/25` §12), and a per-row
+ * query would turn one page into N+1 — the cost `docs/33` §7 forbids. Stopped clocks are
+ * excluded because a stopped clock is history, not the record's current SLA.
+ */
+export function listOpenSlaClocksForEntities(
+  organizationId: string,
+  entityType: string,
+  entityIds: string[],
+  client: DataClient = prisma,
+): Promise<SlaClock[]> {
+  if (entityIds.length === 0) {
+    return Promise.resolve([]);
+  }
+  return client.slaClock.findMany({
+    // The tenant predicate is required, not optional (`ADR-0002`) — and it is also the
+    // leading column of `@@index([organizationId, entityType, entityId])`, so the page
+    // read is an index lookup rather than a scan.
+    where: { organizationId, entityType, entityId: { in: entityIds }, stoppedAt: null },
+    orderBy: { cycle: 'desc' },
+  });
+}
+
+/**
+ * Applies an explicit, audited override to a clock (`docs/25` §11).
+ *
+ * The frozen-target rule protects a clock from *policy* edits (§4 example 5), not from a
+ * deliberate human decision with a recorded reason — which is what this writes. Nothing
+ * here recomputes a target from policy data, so the rule still holds.
+ */
+export function updateSlaClockOverride(
+  id: string,
+  data: {
+    targetAt?: Date;
+    warnAt?: Date;
+    breachedAt?: Date | null;
+    state: SlaClockState;
+  },
+  client: DataClient = prisma,
+): Promise<SlaClock> {
+  return client.slaClock.update({ where: { id }, data });
 }

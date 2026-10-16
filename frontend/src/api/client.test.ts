@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, apiRequest } from './client';
+import { ApiError, BASE_URL, apiRequest } from './client';
 
 /**
  * API client tests (docs/37 §2, docs/11 §4).
@@ -101,5 +101,17 @@ describe('apiRequest error envelope', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(apiRequest('/auth/logout', { method: 'POST' })).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * The base path is configuration, and it is the one misconfiguration that reads as an
+ * outage: with no `/v1` in it every call is a `404`, which the shell can only describe as
+ * "the API is unreachable" even though the API is answering. The path version is fixed by
+ * `docs/11` §1, so any deployment form (relative, or an absolute origin) must end in it.
+ */
+describe('configured base path', () => {
+  it('ends with the `/api/v1` prefix the contract fixes (docs/11 §1)', () => {
+    expect(BASE_URL.endsWith('/api/v1')).toBe(true);
   });
 });

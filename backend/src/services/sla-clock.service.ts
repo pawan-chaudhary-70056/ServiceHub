@@ -9,6 +9,7 @@ import {
   createSlaClock,
   findOpenSlaClock,
   findSlaPolicyById,
+  listOpenSlaClocksForEntities,
   pauseSlaClock,
   resumeSlaClock,
   stopSlaClock,
@@ -200,4 +201,99 @@ export function deriveState(clock: {
   if (clock.breached) return 'BREACHED';
   if (clock.now >= clock.warnAt) return 'AT_RISK';
   return 'ON_TRACK';
+}
+
+/**
+ * The clock as every read surface publishes it (`docs/25` §5, §12).
+ *
+ * `state` here is **derived from the stored timestamps at read time**, not read from the
+ * `state` column: the column is the sweep's cache for querying and is stale by up to one
+ * interval, and a countdown that disagrees with its own badge is worse than no countdown
+ * (`docs/25` §5 makes the derivation authoritative, the column a cache).
+ */
+export interface SlaClockView {
+  id: string;
+  cycle: number;
+  priority: Priority;
+  state: SlaClockState;
+  startedAt: Date;
+  targetAt: Date;
+  warnAt: Date;
+  breachedAt: Date | null;
+  pausedAt: Date | null;
+  stoppedAt: Date | null;
+  totalPausedSeconds: number;
+  /**
+   * Seconds until the frozen target instant; negative once it has passed.
+   *
+   * Deliberately wall-clock, not working time: `targetAt` is already the result of
+   * calendar arithmetic, so the distance to it is the literal time left before breach —
+   * and the arithmetic to restate it in working minutes belongs to the calendar, which a
+   * list read must not pay for per row. A record with no open clock has no SLA view at
+   * all rather than a zero one (`docs/25` §12).
+   */
+  remainingSeconds: number;
+}
+
+/** Projects one clock for an API response. */
+export function describeClock(clock: SlaClock, now: Date = new Date()): SlaClockView {
+  return {
+    id: clock.id,
+    cycle: clock.cycle,
+    priority: clock.priority,
+    state: deriveState({
+      now,
+      paused: clock.pausedAt !== null,
+      breached: clock.breachedAt !== null,
+      warnAt: clock.warnAt,
+      targetAt: clock.targetAt,
+      stopped: clock.stoppedAt !== null,
+    }),
+    startedAt: clock.startedAt,
+    targetAt: clock.targetAt,
+    warnAt: clock.warnAt,
+    breachedAt: clock.breachedAt,
+    pausedAt: clock.pausedAt,
+    stoppedAt: clock.stoppedAt,
+    totalPausedSeconds: clock.totalPausedSeconds,
+    remainingSeconds: Math.round((clock.targetAt.getTime() - now.getTime()) / 1000),
+  };
+}
+
+/**
+ * The live clock views for a set of records, keyed by record id.
+ *
+ * One query for the whole page (`models/sla.model.ts`), so a list can show an SLA
+ * indicator per row without an N+1 (`docs/25` §12, `docs/33` §7).
+ */
+export async function clockViewsFor(
+  organizationId: string,
+  entityType: ClockEntityType,
+  entityIds: string[],
+  now: Date = new Date(),
+): Promise<Map<string, SlaClockView>> {
+  const clocks = await listOpenSlaClocksForEntities(organizationId, entityType, entityIds);
+  const views = new Map<string, SlaClockView>();
+  for (const clock of clocks) {
+    // Newest cycle wins: a reopened record has one live clock, and `orderBy cycle desc`
+    // guarantees the first row seen for an entity is the current one.
+    if (!views.has(clock.entityId)) {
+      views.set(clock.entityId, describeClock(clock, now));
+    }
+  }
+  return views;
+}
+
+/** The live clock view for one record, or null when it has none. */
+export async function clockViewFor(
+  organizationId: string,
+  entityType: ClockEntityType,
+  entityId: string,
+  now: Date = new Date(),
+): Promise<SlaClockView | null> {
+  const clocks = await listOpenSlaClocksForEntities(organizationId, entityType, [entityId]);
+  // One live clock per record: the query is `cycle desc`, and a reopened record's previous
+  // cycle is stopped, so the first row is the current one.
+  const clock = clocks[0];
+  return clock ? describeClock(clock, now) : null;
 }

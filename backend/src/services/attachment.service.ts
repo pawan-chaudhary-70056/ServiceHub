@@ -8,6 +8,7 @@ import {
   sanitizeFilename,
   scanUpload,
 } from '../helpers/file-sniff';
+import { isAntivirusConfigured } from '../integrations/antivirus';
 import { fileStorage, newStorageKey } from '../integrations/storage';
 import {
   countAttachmentsForParent,
@@ -46,6 +47,12 @@ import { assertRequestVisible } from './request.service';
  *   5. **External storage I/O never runs inside a transaction** (`33` §11): metadata is
  *      written, then the bytes are stored, then the row is promoted. The worst
  *      interruption leaves a PENDING row that no response can serve.
+ *
+ * The scan step is asynchronous whenever a scanner is configured (`ANTIVIRUS_URL`): the
+ * upload answers `PENDING` and the scan worker promotes or quarantines it afterwards
+ * (`attachment-scan.service.ts`). With no scanner configured the upload is promoted on the
+ * request path, because there is nothing to wait for — and the response says which of the
+ * two happened rather than leaving the caller to guess.
  *
  * Downloads are audited (`19` §7.3): an attachment is classified Confidential, so a
  * disclosure is always a recorded event.
@@ -281,9 +288,15 @@ export async function uploadAttachment(
     });
   }
 
-  // 9 — promote to AVAILABLE: scanned, stored, now retrievable.
-  const available = await setAttachmentStatus(row.id, 'AVAILABLE');
-  const withUploader = await findAttachmentById(available.id);
+  // 9 — the scan step decides. With a scanner configured the file stays PENDING and only the
+  // scan worker may promote it, so an upload can never be served before it has been scanned
+  // (`19` §7.2 rule 1). With no scanner there is nothing to wait for, and promoting here is
+  // the honest behaviour for a stack whose only gate is the content sniff — the response is
+  // identical either way, and the status on it says which happened.
+  const settled = isAntivirusConfigured() ? row : await setAttachmentStatus(row.id, 'AVAILABLE');
+  // Re-read either way, so the response carries the status the database actually holds
+  // rather than the one this function believed it set.
+  const withUploader = await findAttachmentById(settled.id);
   return toView(withUploader as AttachmentWithUploader);
 }
 

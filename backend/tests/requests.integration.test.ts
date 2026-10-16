@@ -35,13 +35,17 @@ const AGENT_PASSWORD = 'H4qWn8-Zr2s!m';
 
 let databaseAvailable = false;
 
-function dbIt(name: string, fn: () => Promise<void> | void): void {
-  it(name, async (ctx) => {
-    if (!databaseAvailable) {
-      ctx.skip();
-    }
-    await fn();
-  });
+function dbIt(name: string, fn: () => Promise<void> | void, timeout?: number): void {
+  it(
+    name,
+    async (ctx) => {
+      if (!databaseAvailable) {
+        ctx.skip();
+      }
+      await fn();
+    },
+    timeout,
+  );
 }
 
 async function seedReferenceData(): Promise<void> {
@@ -270,6 +274,11 @@ describe('service requests', () => {
     expect(created.reference).toMatch(/^REQ-\d{4}-\d{6}$/);
     expect(created.status).toBe('NEW');
     expect(created.priority).toBe('HIGH');
+    // The view carries the item's approval requirement, because that is what tells the
+    // client whether to offer the approval transition. The transition re-checks the rule
+    // server-side (`request.service.ts`), so this is a hint on the response, never the
+    // control.
+    expect(created.catalogItem).toMatchObject({ id: itemId, requiresApproval: false });
     expect(created.fields[0]).toMatchObject({
       key: 'application',
       label: 'Application',
@@ -461,6 +470,50 @@ describe('service requests', () => {
     expect(cancel.status).toBe(200);
     expect(cancel.body.request.status).toBe('CANCELLED');
   });
+
+  dbIt(
+    'gives 500 concurrent creates 500 distinct references (docs/22 §14 AC4)',
+    async () => {
+      const attempts = 500;
+      // Fired together, not in sequence: the reference counter has to be atomic, and the
+      // unique index on `(organizationId, reference)` is the backstop that turns a lost
+      // update into a failed create rather than a duplicate a user would see.
+      const responses = await Promise.all(
+        Array.from({ length: attempts }, (_, index) =>
+          request(app)
+            .post(`${BASE}/requests`)
+            .set('cookie', requester.cookie)
+            .set('x-csrf-token', requester.csrf)
+            .send({
+              catalogItemId: itemId,
+              title: `Concurrent create ${index}`,
+              fields: { application: 'Payroll' },
+            }),
+        ),
+      );
+
+      const failures = responses.filter((response) => response.status !== 201);
+      expect(
+        failures.map((response) => [response.status, response.body?.code, response.body?.title]),
+      ).toEqual([]);
+
+      const references = responses.map((response) => String(response.body.request.reference));
+      const ids = responses.map((response) => String(response.body.request.id));
+      expect(new Set(references).size).toBe(attempts);
+
+      // The uniqueness is in the database, not only in the responses, and every create
+      // started its own clock — the other write racing in the same transaction.
+      expect(
+        await prisma.serviceRequest.count({
+          where: { organizationId, reference: { in: references } },
+        }),
+      ).toBe(attempts);
+      expect(
+        await prisma.slaClock.count({ where: { organizationId, entityId: { in: ids } } }),
+      ).toBe(attempts);
+    },
+    180_000,
+  );
 
   async function getCreatedRequest(): Promise<{ reference: string }> {
     const response = await request(app)

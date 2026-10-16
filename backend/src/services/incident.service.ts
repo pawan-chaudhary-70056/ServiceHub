@@ -47,7 +47,14 @@ import {
 } from '../models';
 import { AUDIT_ACTION, AUDIT_ENTITY, OUTBOX_EVENT } from './audit-events';
 import type { RequestMeta } from './context';
-import { startClock, stopClock } from './sla-clock.service';
+import { invalidateReportCache } from './report-cache';
+import {
+  clockViewFor,
+  clockViewsFor,
+  startClock,
+  stopClock,
+  type SlaClockView,
+} from './sla-clock.service';
 
 /**
  * Incidents — docs/23, F-06.
@@ -159,6 +166,8 @@ export interface IncidentView {
   assignee: { id: string; displayName: string } | null;
   team: { id: string; name: string } | null;
   slaPolicy: { id: string; name: string };
+  /** The live clock, or null when the incident has none (`docs/25` §12). */
+  sla: SlaClockView | null;
   resolutionSummary: string | null;
   reopenCount: number;
   resolvedAt: Date | null;
@@ -178,11 +187,21 @@ export interface IncidentSummary {
   assigneeName: string | null;
   teamName: string | null;
   slaPolicyName: string;
+  /** SLA state and time remaining, so the list can surface criticals (`docs/25` §12). */
+  sla: SlaClockView | null;
   createdAt: Date;
   updatedAt: Date;
 }
 
-function toView(incident: IncidentWithRelations): IncidentView {
+/**
+ * Projects an incident for a response, attaching the live clock.
+ *
+ * Async for the same reason as a request's projection: every path that returns an incident
+ * — report, read, assign, resolve, close, reopen, major on/off — must carry the current SLA
+ * state, or a mutation would leave the countdown on screen disagreeing with the record.
+ */
+async function toView(incident: IncidentWithRelations): Promise<IncidentView> {
+  const sla = await clockViewFor(incident.organizationId, ENTITY_TYPE, incident.id);
   return {
     id: incident.id,
     reference: incident.reference,
@@ -199,6 +218,7 @@ function toView(incident: IncidentWithRelations): IncidentView {
       : null,
     team: incident.team ? { id: incident.team.id, name: incident.team.name } : null,
     slaPolicy: { id: incident.slaPolicy.id, name: incident.slaPolicy.name },
+    sla,
     resolutionSummary: incident.resolutionSummary,
     reopenCount: incident.reopenCount,
     resolvedAt: incident.resolvedAt,
@@ -208,7 +228,7 @@ function toView(incident: IncidentWithRelations): IncidentView {
   };
 }
 
-function toSummary(incident: IncidentWithRelations): IncidentSummary {
+function toSummary(incident: IncidentWithRelations, sla: SlaClockView | null): IncidentSummary {
   return {
     id: incident.id,
     reference: incident.reference,
@@ -220,6 +240,7 @@ function toSummary(incident: IncidentWithRelations): IncidentSummary {
     assigneeName: incident.assignee?.displayName ?? null,
     teamName: incident.team?.name ?? null,
     slaPolicyName: incident.slaPolicy.name,
+    sla,
     createdAt: incident.createdAt,
     updatedAt: incident.updatedAt,
   };
@@ -330,6 +351,10 @@ export async function createIncidentFromReport(
     return incident;
   });
 
+  // After the commit (`docs/30` §3.4): a new incident moves the incident figures and
+  // starts its SLA clock.
+  await invalidateReportCache(organizationId, 'report.incidents', 'report.sla');
+
   return toView((await findIncidentById(created.id)) as IncidentWithRelations);
 }
 
@@ -372,7 +397,15 @@ export async function listIncidentsPage(
   });
 
   const page = buildCursorPage(rows, input.limit, (row) => row.createdAt);
-  return { ...page, items: page.items.map(toSummary) };
+  const clocks = await clockViewsFor(
+    organizationId,
+    ENTITY_TYPE,
+    page.items.map((row) => row.id),
+  );
+  return {
+    ...page,
+    items: page.items.map((row) => toSummary(row, clocks.get(row.id) ?? null)),
+  };
 }
 
 export function getIncident(id: string, actor: Principal): Promise<IncidentView> {
@@ -484,6 +517,9 @@ export async function updateIncidentFields(
     }
   });
 
+  // A priority/impact/urgency edit moves the incident counts and the major-flag figure.
+  await invalidateReportCache(incident.organizationId, 'report.incidents');
+
   return toView((await findIncidentById(incident.id)) as IncidentWithRelations);
 }
 
@@ -586,6 +622,10 @@ export async function assignIncident(
       );
     }
   });
+
+  // The assignee is a scope predicate in the incident reports (`docs/30` R3), and triage
+  // moves the status to IN_PROGRESS, so the incident figures move either way.
+  await invalidateReportCache(organizationId, 'report.incidents');
 
   return toView((await findIncidentById(incident.id)) as IncidentWithRelations);
 }
@@ -719,6 +759,10 @@ export async function resolveIncident(
     }
   });
 
+  // Resolution is what the incident and SLA figures measure (`docs/30` §3.3 owners `23`
+  // and `25`): the status counts move and the clock stops.
+  await invalidateReportCache(incident.organizationId, 'report.incidents', 'report.sla');
+
   return toView((await findIncidentById(incident.id)) as IncidentWithRelations);
 }
 
@@ -761,6 +805,10 @@ export async function closeIncident(
       tx,
     );
   });
+
+  // A closure moves the status counts. The clock was stopped at resolution, so the SLA
+  // class is not re-invalidated here.
+  await invalidateReportCache(incident.organizationId, 'report.incidents');
 
   return toView((await findIncidentById(incident.id)) as IncidentWithRelations);
 }
@@ -871,6 +919,10 @@ export async function reopenIncident(
     );
   });
 
+  // A reopen clears `resolvedAt` — which is what the reopen-aware MTTR reads — starts a new
+  // clock cycle, and moves the status counts (`docs/30` §3.3, owner `23`).
+  await invalidateReportCache(incident.organizationId, 'report.incidents', 'report.sla');
+
   return toView((await findIncidentById(incident.id)) as IncidentWithRelations);
 }
 
@@ -931,6 +983,9 @@ export async function setIncidentMajor(
       tx,
     );
   });
+
+  // `majorCount` is a reported figure (`docs/30` §3.3, owner `23`).
+  await invalidateReportCache(incident.organizationId, 'report.incidents');
 
   return toView((await findIncidentById(incident.id)) as IncidentWithRelations);
 }

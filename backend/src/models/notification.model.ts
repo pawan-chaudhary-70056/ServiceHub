@@ -166,6 +166,38 @@ export function markNotificationSent(
   });
 }
 
+/**
+ * The notification a provider event refers to (`docs/29` N8).
+ *
+ * Matched on the vendor's message id, which is why `markNotificationSent` stores it: that
+ * id is the *only* thing a delivery, bounce or complaint webhook carries. `findFirst`, not
+ * `findUnique` — the column is deliberately not unique, because two channels may legitimately
+ * hold the same vendor id and a uniqueness constraint would turn a provider quirk into a
+ * failed insert.
+ */
+export function findNotificationByProviderMessageId(
+  providerMessageId: string,
+  client: DataClient = prisma,
+): Promise<Notification | null> {
+  return client.notification.findFirst({ where: { providerMessageId } });
+}
+
+/**
+ * A provider confirmed delivery (`docs/29` N8): "delivered" is a stronger fact than "sent",
+ * so the status moves and the confirmation time is recorded. `DELIVERED` is terminal for the
+ * drain (`TERMINAL_STATUSES`), so a confirmed message is never re-sent.
+ */
+export function markNotificationDelivered(
+  id: string,
+  deliveredAt: Date,
+  client: DataClient = prisma,
+): Promise<Notification> {
+  return client.notification.update({
+    where: { id },
+    data: { status: 'DELIVERED', deliveredAt, failureReason: null },
+  });
+}
+
 export function markNotificationSkipped(
   id: string,
   reason: string,

@@ -9,6 +9,8 @@ import { config, processRole, runsSchedulers, servesHttp } from './config';
 import { disconnectRedis } from './integrations/redis';
 import { disconnectDatabase } from './models';
 import {
+  registerNotificationProviderHandlers,
+  startAttachmentScanScheduler,
   startInboundWebhookScheduler,
   startNotificationScheduler,
   startReportExportScheduler,
@@ -47,6 +49,15 @@ const server: Server = app.listen(config.PORT, () => {
   );
 });
 
+// Provider delivery webhooks (`docs/29` N8) are dispatched by the inbound worker, so the
+// handlers must be on the registry before its first tick. Registered only when this process
+// runs schedulers: an API-role process runs no inbound worker, and registering there would
+// be dead weight. Guarded, not conditional inside the array, so the two entrypoints stay
+// symmetrical.
+if (runsSchedulers(processRole)) {
+  registerNotificationProviderHandlers();
+}
+
 /**
  * The background schedulers (`docs/03` §6, `docs/25` §6, `docs/29` §3, `docs/30` §3.4, `docs/32`).
  *
@@ -54,7 +65,7 @@ const server: Server = app.listen(config.PORT, () => {
  * leader sweeps per tick. They are started here only for `PROCESS_ROLE=all` — the honest
  * single-process developer default. An `api`-role deployment starts none of them: the worker
  * workload owns the queue, and N API instances each scheduling is exactly the defect `docs/03`
- * J5 names. The two entrypoints start the same six, in the same order, so they cannot drift.
+ * J5 names. The two entrypoints start the same seven, in the same order, so they cannot drift.
  */
 const schedulers = runsSchedulers(processRole)
   ? [
@@ -72,6 +83,9 @@ const schedulers = runsSchedulers(processRole)
       startInboundWebhookScheduler(),
       // The roster sync sweep (`docs/32` §6). A no-op unless a directory adapter is configured.
       startRosterSyncScheduler(),
+      // The antivirus scan step (`docs/19` §7.2). A no-op unless a scanner is configured; it
+      // is what promotes an uploaded attachment from PENDING to retrievable.
+      startAttachmentScanScheduler(),
     ]
   : [];
 

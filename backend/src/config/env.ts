@@ -44,6 +44,16 @@ const baseEnvSchema = z.object({
 
   DATABASE_URL: z.string().url(),
 
+  // Transaction queueing (`docs/33` §4: "timeouts ... set, so a stuck query releases its
+  // connection"). `maxWait` is how long a transaction may queue for a pooled connection
+  // before it fails; `timeout` bounds the transaction itself. Both are explicit and
+  // bounded, and the default `maxWait` of 2 s is not: a burst of concurrent writes — 500
+  // parallel request creates is a stated acceptance criterion of `docs/22` §14 — queues
+  // past it and every queued write fails at once, which is a self-inflicted outage rather
+  // than back-pressure.
+  DB_TRANSACTION_MAX_WAIT_MS: z.coerce.number().int().positive().default(10_000),
+  DB_TRANSACTION_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
+
   // Optional locally: the cache/queue provider is Redis (`ADR-0003`). When absent, the
   // app degrades to database reads and defers delivery (docs/33 §16) rather than
   // failing. It is required in a deployed environment (docs/35 §2).
@@ -91,6 +101,13 @@ const baseEnvSchema = z.object({
   // with explicit invalidation on revocation as the primary control.
   SESSION_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(60),
 
+  // Catalog cache regions (`docs/21 §10`, `docs/33 §5.1`). The category tree is the
+  // long region (minutes–hours), the active item list the medium one (minutes); both
+  // are explicitly bounded (C2) and invalidated by every catalog mutation in the same
+  // pathway as the write (C3, `docs/21 §12` AC5).
+  CATALOG_CATEGORY_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(900),
+  CATALOG_ITEM_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(120),
+
   // Password policy (`docs/06 §4`): minimum length 12, bounded at 128 to cap work.
   PASSWORD_MIN_LENGTH: z.coerce.number().int().min(12).max(128).default(12),
   PASSWORD_MAX_LENGTH: z.coerce.number().int().min(12).max(128).default(128),
@@ -116,6 +133,13 @@ const baseEnvSchema = z.object({
   NOTIFICATION_DRAIN_BATCH_SIZE: z.coerce.number().int().positive().max(500).default(50),
   NOTIFICATION_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
   NOTIFICATION_RETRY_BASE_MS: z.coerce.number().int().positive().default(60_000),
+
+  // Dashboard aggregate cache (`docs/30` §3.4: "dashboard aggregates — short TTL,
+  // invalidated on write of that class"). The TTL is the hard bound on staleness for a
+  // write that does not arrive through a mutation — the SLA sweep's breach stamp is the
+  // real case — and it is deliberately short: a dashboard that is minutes behind is a
+  // dashboard nobody trusts, and the aggregates it caches are indexed reads.
+  REPORT_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(60),
 
   // Async report exports (`docs/30` §3.1/§3.4): the result is a time-limited download.
   REPORT_EXPORT_TTL_MINUTES: z.coerce.number().int().positive().default(60),
@@ -189,6 +213,16 @@ const baseEnvSchema = z.object({
   /// Lifetime of a signed download URL (docs/19 §7.3): long enough to fetch, short
   /// enough that a leaked link is worthless.
   SIGNED_URL_TTL_SECONDS: z.coerce.number().int().positive().max(3600).default(300),
+
+  // The asynchronous antivirus scan step (`docs/19` §7.2 step 7). Unset means no scanner is
+  // configured: the content sniff stays the only gate and an upload is promoted on the
+  // request path, which is what development and the test suite rely on. Set means uploads
+  // land `PENDING` and only this worker makes them retrievable — so a configured-but-broken
+  // scanner withholds files rather than serving unscanned bytes (rule 1 of §7.2).
+  ANTIVIRUS_URL: z.string().url().optional(),
+  ANTIVIRUS_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
+  ANTIVIRUS_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+  ANTIVIRUS_BATCH_SIZE: z.coerce.number().int().positive().max(200).default(25),
 
   // Public base URL of the SPA, used to build invitation links in the email payload.
   // Only ever used server-side to compose a link; it grants no authority (docs/17).

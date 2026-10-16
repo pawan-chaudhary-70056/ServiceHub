@@ -39,13 +39,17 @@ const APPROVER2_PASSWORD = 'M4dFs7-Qh3b!t';
 
 let databaseAvailable = false;
 
-function dbIt(name: string, fn: () => Promise<void> | void): void {
-  it(name, async (ctx) => {
-    if (!databaseAvailable) {
-      ctx.skip();
-    }
-    await fn();
-  });
+function dbIt(name: string, fn: () => Promise<void> | void, timeout?: number): void {
+  it(
+    name,
+    async (ctx) => {
+      if (!databaseAvailable) {
+        ctx.skip();
+      }
+      await fn();
+    },
+    timeout,
+  );
 }
 
 async function seedReferenceData(): Promise<void> {
@@ -510,6 +514,50 @@ describe('approvals', () => {
       prisma.$executeRaw`DELETE FROM approval_decisions WHERE id = ${decision.id}`,
     ).rejects.toThrow();
   });
+
+  dbIt(
+    'advances exactly once when two decisions race on the same step (docs/26 §14 AC5)',
+    async () => {
+      const requestId = await raiseRequest(anyItemId, 'Racing decisions');
+      await request(app)
+        .post(`${BASE}/requests/${requestId}/transition`)
+        .set('cookie', agent.cookie)
+        .set('x-csrf-token', agent.csrf)
+        .send({ to: 'APPROVAL_PENDING' })
+        .expect(200);
+      const stepId = await activeStepId(requestId);
+      const workflowId = (await prisma.approvalWorkflow.findUniqueOrThrow({ where: { requestId } }))
+        .id;
+
+      // Two designated approvers decide the same ANY step at the same instant. The step is
+      // claimed atomically, so exactly one decision advances it; the loser is told so with
+      // `409` rather than silently recording a second advance (`docs/26` §5).
+      const [first, second] = await Promise.all([
+        request(app)
+          .post(`${BASE}/approvals/${stepId}/decide`)
+          .set('cookie', approver1.cookie)
+          .set('x-csrf-token', approver1.csrf)
+          .send({ decision: 'APPROVE', comment: 'Approved first.' }),
+        request(app)
+          .post(`${BASE}/approvals/${stepId}/decide`)
+          .set('cookie', approver2.cookie)
+          .set('x-csrf-token', approver2.csrf)
+          .send({ decision: 'APPROVE', comment: 'Approved second.' }),
+      ]);
+
+      expect([first.status, second.status].sort()).toEqual([200, 409]);
+
+      // The losing decision is not recorded at all: it never displaced the winning one.
+      expect(await prisma.approvalDecision.count({ where: { workflowId } })).toBe(1);
+      const workflow = await prisma.approvalWorkflow.findUniqueOrThrow({
+        where: { id: workflowId },
+      });
+      expect(workflow.status).toBe('APPROVED');
+      const request1 = await prisma.serviceRequest.findUniqueOrThrow({ where: { id: requestId } });
+      expect(request1.status).toBe('APPROVED');
+    },
+    60_000,
+  );
 
   dbIt('records every decision in the audit trail (AC8)', async () => {
     const count = await prisma.auditLog.count({

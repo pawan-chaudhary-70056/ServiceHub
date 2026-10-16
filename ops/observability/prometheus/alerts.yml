@@ -81,8 +81,13 @@ groups:
 
       - alert: ServiceHubWorkerStalled
         # The background queue as a whole: notifications, report exports, outbound and inbound
-        # webhooks. Roster sync is deliberately excluded — it is a no-op without a directory
-        # adapter, so "never succeeded" is its correct state rather than a stall.
+        # webhooks. Two jobs are deliberately excluded because "never succeeded" is their
+        # correct state in a valid configuration, and alerting on it is how an alert gets
+        # muted and then ignored:
+        #   - `roster_sync` — a no-op without a directory adapter.
+        #   - `attachment_scan` — a no-op without an antivirus scanner (`ANTIVIRUS_URL`).
+        # A stalled scan worker in a stack that *does* run a scanner is not covered here; see
+        # `ops/observability/README.md` for the condition under which to add it.
         expr: |
           time() - servicehub_job_last_success_timestamp_seconds{
             job=~"notification_drain|report_export|webhook_delivery|inbound_webhook"
@@ -95,8 +100,8 @@ groups:
           summary: A background worker has not succeeded in ten minutes.
           description: |
             Threshold is 5x the slowest default interval in the set. The `job` label names the
-            stalled worker; a roster-sync job is excluded because it is intentionally a no-op
-            without a directory adapter.
+            stalled worker; roster sync and the antivirus scan step are excluded because each is
+            intentionally a no-op when its integration is not configured.
           runbook_url: docs/36-OPERATIONS-AND-RECOVERY.md
 
       - alert: ServiceHubJobFailing

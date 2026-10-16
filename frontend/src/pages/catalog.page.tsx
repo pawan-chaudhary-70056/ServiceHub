@@ -9,9 +9,11 @@ import {
   listCategories,
   listItems,
   retireItem,
+  updateItem,
   type CatalogFieldInput,
   type CatalogFieldType,
   type CatalogItemDetail,
+  type CatalogItemField,
   type CatalogItemSummary,
   type Priority,
 } from '../api/catalog.api';
@@ -281,6 +283,7 @@ function ItemDetail({
   onError: (message: string | null) => void;
 }) {
   const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
 
   const invalidate = (): void => {
     void queryClient.invalidateQueries({ queryKey: ['catalog'] });
@@ -337,6 +340,18 @@ function ItemDetail({
 
         {canManage && (
           <div className="flex gap-2">
+            {/* Editing is offered for every status, not only an active item: fixing a
+                draft before it goes live is the common case (docs/21 §9). The server
+                re-checks `catalog:manage` and reconciles the field definitions, keeping
+                C9 in force (`21` §5). */}
+            <button
+              type="button"
+              onClick={() => setEditing((value) => !value)}
+              aria-expanded={editing}
+              className="rounded border border-border px-3 py-1 text-sm text-content"
+            >
+              {editing ? 'Close editor' : 'Edit service'}
+            </button>
             {item.status !== 'ACTIVE' && (
               <button
                 type="button"
@@ -379,6 +394,10 @@ function ItemDetail({
           <dd className="text-sm text-content">{item.fulfilmentTeam?.name ?? 'No team set'}</dd>
         </div>
       </dl>
+
+      {canManage && editing && (
+        <EditItemForm item={item} onError={onError} onDone={() => setEditing(false)} />
+      )}
 
       <div className="mt-4">
         <p className="text-xs font-medium uppercase tracking-wide text-content-muted">
@@ -510,22 +529,7 @@ function CreateItemForm({
         defaultSlaPolicyId: policyId || null,
         fulfilmentTeamId: teamId || null,
         requiresApproval,
-        fields: fields
-          .filter((field) => field.key.trim() && field.label.trim())
-          .map<CatalogFieldInput>((field) => ({
-            key: field.key.trim(),
-            label: field.label.trim(),
-            fieldType: field.fieldType,
-            isRequired: field.isRequired,
-            ...(field.fieldType === 'SELECT' || field.fieldType === 'MULTI_SELECT'
-              ? {
-                  options: field.options
-                    .split(',')
-                    .map((option) => option.trim())
-                    .filter(Boolean),
-                }
-              : {}),
-          })),
+        fields: toCatalogFieldInputs(fields),
       }),
     onSuccess: (result) => {
       onError(null);
@@ -747,9 +751,288 @@ function CreateItemForm({
   );
 }
 
+function EditItemForm({
+  item,
+  onError,
+  onDone,
+}: {
+  item: CatalogItemDetail;
+  onError: (message: string | null) => void;
+  onDone: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState(item.name);
+  const [description, setDescription] = useState(item.description ?? '');
+  const [priority, setPriority] = useState<Priority>(item.defaultPriority);
+  const [policyId, setPolicyId] = useState(item.defaultSlaPolicyId ?? '');
+  const [teamId, setTeamId] = useState(item.fulfilmentTeamId ?? '');
+  const [requiresApproval, setRequiresApproval] = useState(item.requiresApproval);
+  const [fields, setFields] = useState<FieldDraft[]>(() => draftsFromFields(item.fields));
+
+  const policies = useQuery({
+    queryKey: ['sla', 'policies'],
+    queryFn: ({ signal }) => listPolicies(signal),
+    retry: false,
+  });
+  const teams = useQuery({
+    queryKey: ['teams'],
+    queryFn: ({ signal }) => listTeams(signal),
+    retry: false,
+  });
+
+  const update = useMutation({
+    // The field list is sent in full, because the server reconciles it as a **replace**
+    // (`catalog.service.ts`): a definition omitted here is a definition removed. Sending a
+    // patch of only the changed field would silently drop the rest (docs/21 §5 C9).
+    mutationFn: () =>
+      updateItem(item.id, {
+        name,
+        description: description || null,
+        defaultPriority: priority,
+        defaultSlaPolicyId: policyId || null,
+        fulfilmentTeamId: teamId || null,
+        requiresApproval,
+        fields: toCatalogFieldInputs(fields),
+      }),
+    onSuccess: () => {
+      onError(null);
+      void queryClient.invalidateQueries({ queryKey: ['catalog'] });
+      onDone();
+    },
+    onError: (error) => onError(messageFor(error)),
+  });
+
+  return (
+    <form
+      className="mt-4 space-y-4 rounded border border-border bg-surface-muted p-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (name.trim()) update.mutate();
+      }}
+    >
+      <div className="flex items-center justify-between">
+        <h4 className="text-base font-semibold text-content">Edit service</h4>
+        <button type="button" onClick={onDone} className="text-sm text-content-muted">
+          Cancel
+        </button>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="space-y-1 text-sm">
+          <span className="block font-medium text-content">Name</span>
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            className="w-full rounded border border-border bg-surface px-3 py-2 text-content"
+          />
+        </label>
+
+        <label className="space-y-1 text-sm">
+          <span className="block font-medium text-content">Default priority</span>
+          <select
+            value={priority}
+            onChange={(event) => setPriority(event.target.value as Priority)}
+            className="w-full rounded border border-border bg-surface px-3 py-2 text-content"
+          >
+            {PRIORITIES.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="space-y-1 text-sm sm:col-span-2">
+          <span className="block font-medium text-content">Description</span>
+          <textarea
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            rows={2}
+            className="w-full rounded border border-border bg-surface px-3 py-2 text-content"
+          />
+        </label>
+
+        <label className="space-y-1 text-sm">
+          <span className="block font-medium text-content">SLA policy</span>
+          <select
+            value={policyId}
+            onChange={(event) => setPolicyId(event.target.value)}
+            className="w-full rounded border border-border bg-surface px-3 py-2 text-content"
+          >
+            <option value="">None</option>
+            {(policies.data?.items ?? []).map((policy) => (
+              <option key={policy.id} value={policy.id}>
+                {policy.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="space-y-1 text-sm">
+          <span className="block font-medium text-content">Fulfilment team</span>
+          <select
+            value={teamId}
+            onChange={(event) => setTeamId(event.target.value)}
+            className="w-full rounded border border-border bg-surface px-3 py-2 text-content"
+          >
+            <option value="">None</option>
+            {(teams.data?.items ?? []).map((team) => (
+              <option key={team.id} value={team.id}>
+                {team.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="flex items-center gap-2 text-sm sm:col-span-2">
+          <input
+            type="checkbox"
+            checked={requiresApproval}
+            onChange={(event) => setRequiresApproval(event.target.checked)}
+          />
+          <span className="text-content">Requires approval before fulfilment</span>
+        </label>
+      </div>
+
+      <div className="space-y-2">
+        <p className="text-sm font-medium text-content">Form fields</p>
+        <p className="text-xs text-content-muted">
+          A saved change applies to new requests. Answers already captured keep the wording they
+          were given — a field definition is snapshotted into the request at creation.
+        </p>
+        {fields.map((field, index) => (
+          <div key={index} className="grid gap-2 sm:grid-cols-[1fr_1fr_1fr_auto_auto]">
+            <input
+              aria-label={`Field ${index + 1} key`}
+              value={field.key}
+              onChange={(event) =>
+                updateField(fields, setFields, index, { key: event.target.value })
+              }
+              placeholder="key"
+              className="rounded border border-border bg-surface px-2 py-1 text-sm text-content"
+            />
+            <input
+              aria-label={`Field ${index + 1} label`}
+              value={field.label}
+              onChange={(event) =>
+                updateField(fields, setFields, index, { label: event.target.value })
+              }
+              placeholder="Label"
+              className="rounded border border-border bg-surface px-2 py-1 text-sm text-content"
+            />
+            <select
+              aria-label={`Field ${index + 1} type`}
+              value={field.fieldType}
+              onChange={(event) =>
+                updateField(fields, setFields, index, {
+                  fieldType: event.target.value as CatalogFieldType,
+                })
+              }
+              className="rounded border border-border bg-surface px-2 py-1 text-sm text-content"
+            >
+              {FIELD_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {type}
+                </option>
+              ))}
+            </select>
+            <label className="flex items-center gap-1 text-xs text-content-muted">
+              <input
+                type="checkbox"
+                checked={field.isRequired}
+                onChange={(event) =>
+                  updateField(fields, setFields, index, { isRequired: event.target.checked })
+                }
+              />
+              req
+            </label>
+            <button
+              type="button"
+              onClick={() => setFields(fields.filter((_, i) => i !== index))}
+              className="text-sm text-content-muted"
+            >
+              Remove
+            </button>
+            {(field.fieldType === 'SELECT' || field.fieldType === 'MULTI_SELECT') && (
+              <input
+                aria-label={`Field ${index + 1} options`}
+                value={field.options}
+                onChange={(event) =>
+                  updateField(fields, setFields, index, { options: event.target.value })
+                }
+                placeholder="Options, comma separated"
+                className="rounded border border-border bg-surface px-2 py-1 text-sm text-content sm:col-span-5"
+              />
+            )}
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={() => setFields([...fields, emptyField()])}
+          className="rounded border border-border px-3 py-1 text-sm text-content"
+        >
+          + Add field
+        </button>
+      </div>
+
+      <button
+        type="submit"
+        disabled={update.isPending || !name.trim()}
+        className="rounded bg-brand px-4 py-2 text-content-inverted disabled:opacity-60"
+      >
+        {update.isPending ? 'Saving…' : 'Save changes'}
+      </button>
+    </form>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Reads a stored field's options into the comma-separated text the editor works in.
+ * A non-array (or absent) `options` is not an error — only the choice types have any.
+ */
+function optionText(options: unknown): string {
+  return Array.isArray(options)
+    ? options.filter((option): option is string => typeof option === 'string').join(', ')
+    : '';
+}
+
+/** Turns an item's saved definitions into editor drafts, so editing starts from truth. */
+function draftsFromFields(fields: CatalogItemField[]): FieldDraft[] {
+  return fields.map((field) => ({
+    key: field.key,
+    label: field.label,
+    fieldType: field.fieldType,
+    isRequired: field.isRequired,
+    options: optionText(field.options),
+  }));
+}
+
+/**
+ * Drafts to API input. Shared by create and edit so the two cannot drift: a field the
+ * editor can add but the payload drops would be a silent data loss.
+ */
+function toCatalogFieldInputs(fields: FieldDraft[]): CatalogFieldInput[] {
+  return fields
+    .filter((field) => field.key.trim() && field.label.trim())
+    .map((field) => ({
+      key: field.key.trim(),
+      label: field.label.trim(),
+      fieldType: field.fieldType,
+      isRequired: field.isRequired,
+      ...(field.fieldType === 'SELECT' || field.fieldType === 'MULTI_SELECT'
+        ? {
+            options: field.options
+              .split(',')
+              .map((option) => option.trim())
+              .filter(Boolean),
+          }
+        : {}),
+    }));
+}
 
 function updateField(
   fields: FieldDraft[],

@@ -111,6 +111,31 @@ export const createSlaPolicySchema = z
 
 export type CreateSlaPolicyInput = z.infer<typeof createSlaPolicySchema>;
 
+/**
+ * A clock override (`docs/25` §11, §14 AC8).
+ *
+ * The reason is mandatory and long enough to be useful: an override with a blank reason is
+ * an unexplained change to a contractual deadline, which is precisely what the audit trail
+ * exists to prevent. At least one effect must be requested, so an override that changes
+ * nothing is rejected rather than recorded as a no-op entry nobody can interpret.
+ */
+export const overrideSlaClockSchema = z
+  .object({
+    reason: z.string().trim().min(5, 'A reason is required.').max(500),
+    targetAt: z
+      .string()
+      .datetime({ offset: true, message: 'Use an ISO 8601 instant, e.g. 2026-10-20T17:00:00Z.' })
+      .optional(),
+    clearBreach: z.boolean().optional(),
+  })
+  .strict()
+  .refine((input) => input.targetAt !== undefined || input.clearBreach === true, {
+    message: 'An override must move the target, clear the breach, or both.',
+    path: ['targetAt'],
+  });
+
+export type OverrideSlaClockInput = z.infer<typeof overrideSlaClockSchema>;
+
 export const updateSlaPolicySchema = z
   .object({
     name: z.string().trim().min(2).max(120).optional(),
@@ -121,3 +146,21 @@ export const updateSlaPolicySchema = z
     targets: z.array(slaTargetSchema).min(1).max(4).optional(),
   })
   .strict();
+
+/**
+ * `PATCH /sla/calendars/{id}` (docs/25 §4 rule 6, §11).
+ *
+ * The create schema made partial — same field rules, no requirement to resend what is not
+ * changing. The body must carry *something*: an empty edit is a `422` rather than a `200`
+ * that pretends a version was created. The service, not the schema, owns the consequence
+ * (a new version row, the old one superseded), because that is a rule about history rather
+ * than about the shape of a request.
+ */
+export const updateBusinessCalendarSchema = createBusinessCalendarSchema
+  .partial()
+  .refine(
+    (value) => Object.values(value).some((field) => field !== undefined),
+    'Provide at least one field to change.',
+  );
+
+export type UpdateBusinessCalendarInput = z.infer<typeof updateBusinessCalendarSchema>;

@@ -43,8 +43,17 @@ import {
 } from '../models';
 import { AUDIT_ACTION, AUDIT_ENTITY, OUTBOX_EVENT } from './audit-events';
 import { cancelWorkflowForRequest, instantiateWorkflowForRequest } from './approval.service';
+import { invalidateReportCache } from './report-cache';
 import type { RequestMeta } from './context';
-import { pauseClockIfPolicy, resumeClock, startClock, stopClock } from './sla-clock.service';
+import {
+  clockViewFor,
+  clockViewsFor,
+  pauseClockIfPolicy,
+  resumeClock,
+  startClock,
+  stopClock,
+  type SlaClockView,
+} from './sla-clock.service';
 
 /**
  * Service requests — docs/22, F-05.
@@ -109,11 +118,19 @@ export interface RequestView {
   description: string | null;
   status: RequestStatus;
   priority: Priority;
-  catalogItem: { id: string; name: string };
+  /** `requiresApproval` is carried so the client can offer the approval transition; the
+   * model already loads it (`request.model.ts`), and the server re-checks the rule. */
+  catalogItem: { id: string; name: string; requiresApproval: boolean };
   requester: { id: string; displayName: string };
   assignee: { id: string; displayName: string } | null;
   team: { id: string; name: string } | null;
   slaPolicy: { id: string; name: string };
+  /**
+   * The live clock, or null when the record has none (`docs/25` §12). The SLA indicator
+   * renders from this: state plus the time remaining to the frozen target, so the header
+   * answers "is this urgent?" without a second request.
+   */
+  sla: SlaClockView | null;
   fields: Array<{
     key: string;
     label: string;
@@ -138,6 +155,9 @@ export interface RequestSummary {
   requesterName: string;
   assigneeName: string | null;
   slaPolicyName: string;
+  /** The live clock (`docs/22` §14 AC5: SLA state is visible in the list, not only on the
+   * record). One batched query covers the whole page, so no row costs a query of its own. */
+  sla: SlaClockView | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -151,7 +171,17 @@ export interface CreateRequestInput {
   idempotencyKey?: string;
 }
 
-function toView(request: RequestWithRelations): RequestView {
+/**
+ * Projects a request for a response.
+ *
+ * Async because it attaches the live clock, and it loads the clock here rather than at
+ * each call site so **every** path that returns a request — create, read, assign,
+ * transition, cancel — shows the current SLA state. A transition response that omitted the
+ * clock would leave the UI showing a stale countdown after the very action that changed it
+ * (fulfilment stops the clock; entering an approval may pause it).
+ */
+async function toView(request: RequestWithRelations): Promise<RequestView> {
+  const sla = await clockViewFor(request.organizationId, ENTITY_TYPE, request.id);
   return {
     id: request.id,
     reference: request.reference,
@@ -159,13 +189,18 @@ function toView(request: RequestWithRelations): RequestView {
     description: request.description,
     status: request.status,
     priority: request.priority,
-    catalogItem: { id: request.catalogItem.id, name: request.catalogItem.name },
+    catalogItem: {
+      id: request.catalogItem.id,
+      name: request.catalogItem.name,
+      requiresApproval: request.catalogItem.requiresApproval,
+    },
     requester: { id: request.requester.id, displayName: request.requester.displayName },
     assignee: request.assignee
       ? { id: request.assignee.id, displayName: request.assignee.displayName }
       : null,
     team: request.team ? { id: request.team.id, name: request.team.name } : null,
     slaPolicy: { id: request.slaPolicy.id, name: request.slaPolicy.name },
+    sla,
     fields: request.fieldValues.map((value) => ({
       key: value.fieldKey,
       label: value.fieldLabel,
@@ -181,7 +216,7 @@ function toView(request: RequestWithRelations): RequestView {
   };
 }
 
-function toSummary(request: RequestWithRelations): RequestSummary {
+function toSummary(request: RequestWithRelations, sla: SlaClockView | null): RequestSummary {
   return {
     id: request.id,
     reference: request.reference,
@@ -192,6 +227,7 @@ function toSummary(request: RequestWithRelations): RequestSummary {
     requesterName: request.requester.displayName,
     assigneeName: request.assignee?.displayName ?? null,
     slaPolicyName: request.slaPolicy.name,
+    sla,
     createdAt: request.createdAt,
     updatedAt: request.updatedAt,
   };
@@ -297,6 +333,10 @@ export async function createRequest(
     return request;
   });
 
+  // After the commit (`docs/30` §3.4): a new request moves the request figures and starts
+  // an SLA clock, so both classes are invalidated.
+  await invalidateReportCache(organizationId, 'report.requests', 'report.sla');
+
   return toView((await findRequestById(created.id)) as RequestWithRelations);
 }
 
@@ -399,7 +439,17 @@ export async function listRequestsPage(
   });
 
   const page = buildCursorPage(rows, input.limit, (row) => row.createdAt);
-  return { ...page, items: page.items.map(toSummary) };
+  // One query for the page's clocks (`docs/25` §12): an indicator per row must not become
+  // an N+1.
+  const clocks = await clockViewsFor(
+    organizationId,
+    ENTITY_TYPE,
+    page.items.map((row) => row.id),
+  );
+  return {
+    ...page,
+    items: page.items.map((row) => toSummary(row, clocks.get(row.id) ?? null)),
+  };
 }
 
 export async function getRequest(id: string, actor: Principal): Promise<RequestView> {
@@ -625,6 +675,11 @@ export async function transitionRequest(
     await cancelWorkflowForRequest(request.id, actor, meta);
   }
 
+  // The status change moves the request figures, the same transaction paused/resumed or
+  // stopped the clock, and entering or leaving APPROVAL_PENDING raised or decided a
+  // workflow (`docs/30` §3.4).
+  await invalidateReportCache(organizationId, 'report.requests', 'report.sla', 'report.approvals');
+
   return toView((await findRequestById(request.id)) as RequestWithRelations);
 }
 
@@ -755,6 +810,10 @@ export async function assignRequest(
       );
     }
   });
+
+  // Reassignment changes whose work this is, and the assignee is a scope predicate in the
+  // request reports (`docs/30` R3): the previous and the new assignee's figures both move.
+  await invalidateReportCache(organizationId, 'report.requests');
 
   return toView((await findRequestById(request.id)) as RequestWithRelations);
 }

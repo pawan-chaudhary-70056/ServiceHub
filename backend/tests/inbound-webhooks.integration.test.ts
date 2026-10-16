@@ -18,6 +18,10 @@ import {
   processInboundWebhookEvents,
   registerInboundHandler,
 } from '../src/services/inbound-webhook.service';
+import {
+  PROVIDER_NOTIFICATION_EVENT,
+  registerNotificationProviderHandlers,
+} from '../src/services/notification-provider-webhooks';
 
 /**
  * Inbound webhooks — integration tests (docs/37 §3, docs/32 §5/§15).
@@ -185,6 +189,28 @@ describe('Inbound webhooks', () => {
       .send({ token: invited.body.invitation.token, password })
       .expect(204);
     return sessionFrom(await login(email, password));
+  }
+
+  /**
+   * A sent notification carrying a vendor message id, which is what a provider event
+   * correlates on (`docs/29` N8, `integrations/index.ts`).
+   */
+  async function seedSentNotification(providerMessageId: string): Promise<string> {
+    const organization = await prisma.organization.findFirstOrThrow();
+    const row = await prisma.notification.create({
+      data: {
+        organizationId: organization.id,
+        recipient: 'rita@initech-inbound.test',
+        channel: 'EMAIL',
+        eventType: 'request.assigned',
+        templateVersion: 'v1',
+        status: 'SENT',
+        providerMessageId,
+        sentAt: new Date(),
+        dedupeKey: `evt:${providerMessageId}`,
+      },
+    });
+    return row.id;
   }
 
   /** Registers a receiver and returns its key and secret. */
@@ -393,6 +419,155 @@ describe('Inbound webhooks', () => {
       await processInboundWebhookEvents({ now: new Date(clock + 60_000), jitter: () => 0 });
       const after = await prisma.inboundWebhookEvent.findUniqueOrThrow({ where: { id: dead.id } });
       expect(after.status).toBe('PROCESSED');
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // Provider delivery webhooks — `docs/29` N8
+  // ---------------------------------------------------------------------------
+
+  dbIt('records a provider delivery confirmation as DELIVERED, not SENT', async () => {
+    registerNotificationProviderHandlers();
+    const { key, secret } = await registerEndpoint('provider-delivery', 'Email Provider');
+    const notificationId = await seedSentNotification('pm-delivered-1');
+
+    await postInbound(
+      key,
+      JSON.stringify({
+        id: 'pmdel-1',
+        type: PROVIDER_NOTIFICATION_EVENT.DELIVERED,
+        messageId: 'pm-delivered-1',
+        timestamp: Date.now() - 1_000,
+      }),
+      secret,
+    ).expect(202);
+
+    await processInboundWebhookEvents({ jitter: () => 0 });
+
+    const row = await prisma.notification.findUniqueOrThrow({ where: { id: notificationId } });
+    expect(row.status).toBe('DELIVERED');
+    // `deliveredAt` is what makes the delivery report able to distinguish the two (`30` §3.3).
+    expect(row.deliveredAt).not.toBeNull();
+    expect(row.failureReason).toBeNull();
+  });
+
+  dbIt('marks a bounced address DEAD, so the drain does not mail it again', async () => {
+    registerNotificationProviderHandlers();
+    const { key, secret } = await registerEndpoint('provider-bounce', 'Email Provider');
+    const notificationId = await seedSentNotification('pm-bounced-1');
+
+    await postInbound(
+      key,
+      JSON.stringify({
+        id: 'pmbounce-1',
+        type: PROVIDER_NOTIFICATION_EVENT.BOUNCED,
+        // Nested under `event-data`, as one provider class sends it.
+        'event-data': { messageId: 'pm-bounced-1', reason: '550 mailbox unavailable' },
+      }),
+      secret,
+    ).expect(202);
+
+    await processInboundWebhookEvents({ jitter: () => 0 });
+
+    const row = await prisma.notification.findUniqueOrThrow({ where: { id: notificationId } });
+    // DEAD, not FAILED: FAILED is non-terminal and the drain would retry it on every pass.
+    expect(row.status).toBe('DEAD');
+    expect(row.failureReason).toContain('bounce');
+    expect(row.failureReason).toContain('550 mailbox unavailable');
+  });
+
+  dbIt('marks a spam complaint DEAD', async () => {
+    registerNotificationProviderHandlers();
+    const { key, secret } = await registerEndpoint('provider-complaint', 'Email Provider');
+    const notificationId = await seedSentNotification('pm-complained-1');
+
+    await postInbound(
+      key,
+      JSON.stringify({
+        id: 'pmcomplaint-1',
+        type: PROVIDER_NOTIFICATION_EVENT.COMPLAINED,
+        data: { messageId: 'pm-complained-1' },
+      }),
+      secret,
+    ).expect(202);
+
+    await processInboundWebhookEvents({ jitter: () => 0 });
+
+    const row = await prisma.notification.findUniqueOrThrow({ where: { id: notificationId } });
+    expect(row.status).toBe('DEAD');
+    expect(row.failureReason).toContain('spam');
+  });
+
+  dbIt('applies a redelivered provider event exactly once', async () => {
+    registerNotificationProviderHandlers();
+    const { key, secret } = await registerEndpoint('provider-duplicate', 'Email Provider');
+    const notificationId = await seedSentNotification('pm-duplicate-1');
+    const body = JSON.stringify({
+      id: 'pmdup-1',
+      type: PROVIDER_NOTIFICATION_EVENT.DELIVERED,
+      messageId: 'pm-duplicate-1',
+    });
+
+    await postInbound(key, body, secret).expect(202);
+    await postInbound(key, body, secret).expect(202);
+    await processInboundWebhookEvents({ jitter: () => 0 });
+
+    const events = await prisma.inboundWebhookEvent.count({
+      where: { providerEventId: 'pmdup-1' },
+    });
+    expect(events).toBe(1);
+
+    const row = await prisma.notification.findUniqueOrThrow({ where: { id: notificationId } });
+    expect(row.status).toBe('DELIVERED');
+  });
+
+  dbIt('accepts a provider event for an unknown message without failing it', async () => {
+    registerNotificationProviderHandlers();
+    const { key, secret } = await registerEndpoint('provider-unknown', 'Email Provider');
+
+    await postInbound(
+      key,
+      JSON.stringify({
+        id: 'pmunknown-1',
+        type: PROVIDER_NOTIFICATION_EVENT.DELIVERED,
+        messageId: 'pm-never-sent',
+      }),
+      secret,
+    ).expect(202);
+
+    // A stale event for a message this environment never sent must not dead-letter the
+    // endpoint — it is processed and simply does nothing.
+    await processInboundWebhookEvents({ jitter: () => 0 });
+
+    const event = await prisma.inboundWebhookEvent.findFirstOrThrow({
+      where: { providerEventId: 'pmunknown-1' },
+    });
+    expect(event.status).toBe('PROCESSED');
+    expect(event.attempts).toBe(0);
+  });
+
+  dbIt(
+    'fails a provider event with no message id so it is visible, not silently applied',
+    async () => {
+      registerNotificationProviderHandlers();
+      const { key, secret } = await registerEndpoint('provider-malformed', 'Email Provider');
+
+      await postInbound(
+        key,
+        JSON.stringify({ id: 'pmbad-1', type: PROVIDER_NOTIFICATION_EVENT.BOUNCED }),
+        secret,
+      ).expect(202);
+
+      await processInboundWebhookEvents({ jitter: () => 0 });
+
+      const event = await prisma.inboundWebhookEvent.findFirstOrThrow({
+        where: { providerEventId: 'pmbad-1' },
+      });
+      // A failed attempt (retryable), not `PROCESSED`: the raw payload and the reason are both
+      // retained, so the event is visible and fixable rather than acknowledged as applied.
+      expect(event.status).toBe('FAILED');
+      expect(event.attempts).toBe(1);
+      expect(event.lastError).toContain('message id');
     },
   );
 });

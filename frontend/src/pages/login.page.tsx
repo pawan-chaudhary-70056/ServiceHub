@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
-import { Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { z } from 'zod';
 import { ApiError } from '../api/client';
 import { useAuth } from '../hooks/auth-context';
@@ -44,7 +44,12 @@ export function LoginPage() {
     defaultValues: { email: '', password: '' },
   });
 
-  const from = (location.state as { from?: string } | null)?.from ?? '/superadmin';
+  // Where to land after sign-in. A guard that bounced the user here sets `from` so they
+  // return to the page they asked for; otherwise the landing is the home page. It must
+  // **not** be an administration route: the default has to work for every identity, and
+  // a tenant member sent to `/superadmin` would be shown "Access denied" immediately
+  // after a successful sign-in (`RequireAuth`, docs/14).
+  const from = (location.state as { from?: string } | null)?.from ?? '/';
 
   if (isAuthenticated) {
     return <Navigate to={from} replace />;
@@ -132,6 +137,14 @@ export function LoginPage() {
           {isSubmitting ? 'Signing in…' : 'Sign in'}
         </button>
       </form>
+
+      {/* The reset flow is reachable from here and nowhere else: a user who cannot sign in
+          has no other surface to start from (docs/06 §5). */}
+      <p className="text-sm text-content-muted">
+        <Link to="/forgot-password" className="text-brand underline">
+          Forgot your password?
+        </Link>
+      </p>
     </section>
   );
 }

@@ -9,6 +9,7 @@ import {
 } from '../models';
 import { logger } from '../utils/logger';
 import { AUDIT_ACTION, AUDIT_ENTITY, OUTBOX_EVENT } from './audit-events';
+import { invalidateReportCache } from './report-cache';
 
 /**
  * SLA breach and at-risk sweep — docs/25 §6.
@@ -67,6 +68,13 @@ export async function runSlaSweep(now: Date = new Date()): Promise<SweepResult> 
         tx,
       );
     });
+  }
+
+  // A breach stamp changes the stored attainment figure (`docs/30` §3.2 R1), and it arrives
+  // from this worker rather than a request, so the invalidation is explicit here (`§3.4`).
+  // One bump per tenant, after the commits, rather than one per clock.
+  for (const organizationId of new Set(breaching.map((clock) => clock.organizationId))) {
+    await invalidateReportCache(organizationId, 'report.sla');
   }
 
   const warning = await listClocksDueForWarn(now, SWEEP_BATCH_SIZE);

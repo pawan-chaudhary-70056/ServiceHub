@@ -61,10 +61,12 @@ cd backend
 cp .env.example .env          # then edit if your ports differ
 npm install
 npm run prisma:generate
+npm run prisma:migrate        # apply migrations
+npm run prisma:seed           # roles, permissions, templates
 npm run dev                   # http://localhost:4000
 ```
 
-Health: `GET /api/health/live` and `GET /api/health/ready`.
+Health: `GET /api/v1/health/live` and `GET /api/v1/health/ready`.
 
 ### 3. Frontend
 

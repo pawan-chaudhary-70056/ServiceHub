@@ -123,7 +123,11 @@ export {
   pauseClockIfPolicy,
   resumeClock,
   deriveState,
+  describeClock,
+  clockViewsFor,
+  clockViewFor,
   type ClockEntityType,
+  type SlaClockView,
 } from './sla-clock.service';
 export { runSlaSweep, type SweepResult } from './sla-sweep.service';
 export {
@@ -144,6 +148,12 @@ export { startSlaSweepScheduler, type SlaSweepScheduler } from './sla-sweep-sche
 export { drainOutbox, type DrainResult } from './notification.service';
 export { resolveNotificationTemplate, type RenderedMessage } from './notification-templates';
 export { startNotificationScheduler, type NotificationScheduler } from './notification-scheduler';
+// Provider delivery webhooks (`docs/29` N8): delivery, bounce and complaint update the
+// notification record. Registered explicitly by each entrypoint, not on import.
+export {
+  PROVIDER_NOTIFICATION_EVENT,
+  registerNotificationProviderHandlers,
+} from './notification-provider-webhooks';
 export {
   listMyPreferences,
   updateMyPreferences,
@@ -181,12 +191,17 @@ export {
   listCalendars,
   listPolicies,
   getPolicy,
+  getClock,
+  overrideClock,
   createCalendar,
+  updateCalendar,
   createPolicy,
   updatePolicy,
   seedTenantSlaDefaults,
   type CreateCalendarInput,
+  type UpdateCalendarInput,
   type CreatePolicyInput,
+  type ClockOverrideInput,
 } from './sla.service';
 export {
   requestExport,
@@ -365,3 +380,10 @@ export {
   type DownloadTarget,
   type UploadInput,
 } from './attachment.service';
+// The asynchronous antivirus scan step (`docs/19` §7.2): the worker that makes an uploaded
+// file retrievable, and the scheduler that drives it.
+export { scanPendingAttachments, type AttachmentScanResult } from './attachment-scan.service';
+export {
+  startAttachmentScanScheduler,
+  type AttachmentScanScheduler,
+} from './attachment-scan-scheduler';

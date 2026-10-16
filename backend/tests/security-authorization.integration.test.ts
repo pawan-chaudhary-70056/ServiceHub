@@ -473,6 +473,8 @@ describe('docs/20 §4/§5 authorization matrix and IDOR sweep', () => {
         body: { to: 'CANCELLED' },
       },
       { method: 'post', path: `${BASE}/sla/calendars`, body: { name: 'nope' } },
+      // The id never reaches the handler: `sla:policy:manage` is refused first.
+      { method: 'patch', path: `${BASE}/sla/calendars/not-reached`, body: { timeZone: 'UTC' } },
       { method: 'post', path: `${BASE}/platform/organizations`, body: { name: 'nope' } },
       { method: 'patch', path: `${BASE}/catalog/items/${itemId}`, body: { name: 'nope' } },
     ];

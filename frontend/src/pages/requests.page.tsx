@@ -9,6 +9,7 @@ import {
   type RequestStatus,
   type RequestSummary,
 } from '../api/requests.api';
+import { SlaIndicator } from '../components/sla-indicator';
 import { StatusBadge } from '../components/status-badge';
 import { priorityTone, statusTone } from '../utils/request-tones';
 
@@ -121,6 +122,9 @@ function RequestRow({ request }: { request: RequestSummary }) {
           </span>
         </span>
         <span className="flex items-center gap-2">
+          {/* `docs/25` §12 and `docs/22` §14 AC5: the SLA state is visible in the list, so a
+              reviewer can triage by urgency without opening each record. */}
+          <SlaIndicator sla={request.sla} />
           <StatusBadge tone={priorityTone(request.priority)}>{request.priority}</StatusBadge>
           <StatusBadge tone={statusTone(request.status)}>{request.status}</StatusBadge>
         </span>

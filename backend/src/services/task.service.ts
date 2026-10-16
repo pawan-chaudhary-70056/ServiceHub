@@ -31,6 +31,7 @@ import { assertIncidentVisible } from './incident.service';
 import { assertRequestVisible } from './request.service';
 import { AUDIT_ACTION, AUDIT_ENTITY, OUTBOX_EVENT } from './audit-events';
 import type { RequestMeta } from './context';
+import { invalidateReportCache } from './report-cache';
 
 /**
  * Tasks — docs/24, F-07.
@@ -246,6 +247,9 @@ export async function createTaskOnParent(
     return task;
   });
 
+  // After the commit (`docs/30` §3.4): a new task moves the task counts and the open load.
+  await invalidateReportCache(parent.organizationId, 'report.tasks');
+
   return toView((await findTaskById(created.id)) as TaskWithPeople, parent.label);
 }
 
@@ -378,6 +382,9 @@ export async function updateTaskFields(
     );
   });
 
+  // A due-date or assignee edit moves the overdue count and whose load this task is.
+  await invalidateReportCache(parent.organizationId, 'report.tasks');
+
   return toView((await findTaskById(task.id)) as TaskWithPeople, parent.label);
 }
 
@@ -421,6 +428,9 @@ export async function assignTask(
       );
     }
   });
+
+  // Assignment is a scope predicate in the task reports (`docs/30` R3).
+  await invalidateReportCache(parent.organizationId, 'report.tasks');
 
   return toView((await findTaskById(task.id)) as TaskWithPeople, parent.label);
 }
@@ -525,6 +535,9 @@ export async function transitionTask(
       tx,
     );
   });
+
+  // The status counts and the open/overdue load are both reported (`docs/30` §3.3, owner `24`).
+  await invalidateReportCache(parent.organizationId, 'report.tasks');
 
   return toView((await findTaskById(task.id)) as TaskWithPeople, parent.label);
 }

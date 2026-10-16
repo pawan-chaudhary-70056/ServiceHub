@@ -52,4 +52,11 @@ process.env.FILE_STORAGE_DIR ??= './.storage-test';
 afterEach(async () => {
   const { resetResilience } = await import('../src/integrations/resilience');
   resetResilience();
+
+  // The report cache is process-global by design (it is a cache), and most suites write
+  // rows through Prisma directly — which bypasses the service mutations that invalidate
+  // their class — so a leftover entry from an earlier test would be served to a later one.
+  // Dropping the in-process store between tests restores the isolation the suite assumes.
+  const { resetReportCache } = await import('../src/services/report-cache');
+  resetReportCache();
 });

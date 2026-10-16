@@ -32,6 +32,15 @@ export interface FileStorage {
   signedDownloadUrl(key: string): Promise<string | null>;
   /** Local streaming support; `null` for drivers that serve only by URL. */
   open(key: string): Promise<Readable | null>;
+  /**
+   * The whole object in memory. Needed by the antivirus scan step (`docs/19` §7.2 step 7),
+   * which must hand the actual bytes to a scanner — a scanner cannot scan a URL it cannot
+   * reach, and the backend has no shared filesystem to point one at (§7.1).
+   *
+   * Bounded by the per-file cap (`FILE_MAX_BYTES`), so the read is bounded too: the object
+   * being read was refused at upload if it exceeded that.
+   */
+  get(key: string): Promise<Buffer>;
   remove(key: string): Promise<void>;
 }
 
@@ -90,6 +99,10 @@ class LocalStorage implements FileStorage {
       throw error;
     }
     return createReadStream(full);
+  }
+
+  async get(key: string): Promise<Buffer> {
+    return fs.readFile(this.resolve(key));
   }
 
   async remove(key: string): Promise<void> {
@@ -296,6 +309,24 @@ class S3Storage implements FileStorage {
   open(): Promise<Readable | null> {
     // S3 serves by URL; nothing streams through the backend (docs/19 §7.1).
     return Promise.resolve(null);
+  }
+
+  /**
+   * Reads the object back through a **short-lived presigned URL**, reusing the same signing
+   * as a download: the scan step has no reason to hold bucket credentials of its own, and a
+   * link that expires cannot be replayed.
+   */
+  async get(key: string): Promise<Buffer> {
+    assertKey(key);
+    const url = await this.signedDownloadUrl(key);
+    if (!url) {
+      throw new InternalError('Object storage could not issue a download URL for the scan.');
+    }
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new InternalError(`Object storage could not read the object (${response.status}).`);
+    }
+    return Buffer.from(await response.arrayBuffer());
   }
 
   async remove(key: string): Promise<void> {

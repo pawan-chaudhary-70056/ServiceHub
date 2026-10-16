@@ -84,6 +84,23 @@ export function listAttachmentsForParent(
   });
 }
 
+/**
+ * Attachments still awaiting the scan step, oldest first (`docs/19` §7.2 step 7).
+ *
+ * Oldest first, so the queue cannot starve: a steady upload rate with a newest-first order
+ * would leave the earliest uploads permanently unscanned.
+ */
+export function listPendingAttachments(
+  limit: number,
+  client: DataClient = prisma,
+): Promise<Attachment[]> {
+  return client.attachment.findMany({
+    where: { status: 'PENDING' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: limit,
+  });
+}
+
 /** Status transition of the scan step (docs/19 §7.2 rules 1). */
 export function setAttachmentStatus(
   id: string,

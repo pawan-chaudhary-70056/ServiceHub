@@ -1,4 +1,5 @@
 import { apiRequest } from './client';
+import type { SlaClock } from './sla.api';
 
 /**
  * Incident API (docs/23 §10, docs/11 §9).
@@ -33,6 +34,8 @@ export interface IncidentSummary {
   assigneeName: string | null;
   teamName: string | null;
   slaPolicyName: string;
+  /** The live clock, so the list can surface criticals (`docs/25` §12). */
+  sla: SlaClock | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -51,6 +54,8 @@ export interface IncidentDetail {
   assignee: { id: string; displayName: string } | null;
   team: { id: string; name: string } | null;
   slaPolicy: { id: string; name: string };
+  /** The live clock (state plus time remaining), or null when the clock has stopped. */
+  sla: SlaClock | null;
   resolutionSummary: string | null;
   reopenCount: number;
   resolvedAt: string | null;

@@ -14,8 +14,15 @@ Authoritative documents: `../ServiceHub Enterprise.md` (charter) and `../docs/`
 cp .env.example .env
 npm install
 npm run prisma:generate
+npm run prisma:migrate:deploy   # or `prisma:migrate` in development
+npm run prisma:seed             # roles, permissions, notification templates
 npm run dev          # http://localhost:4000
 ```
+
+`.env` is read by the process entrypoints and the operational CLIs (`src/config/load-env.ts`),
+so nothing has to be exported by hand. A variable that is **already in the environment always
+wins** over the file — that is what lets a deployed container keep secrets injected (`docs/35`
+§7) with no file present at all.
 
 Needs PostgreSQL (and optionally Redis) — easiest via the root compose file:
 
@@ -27,16 +34,21 @@ docker compose up -d postgres redis mailpit
 
 ## Scripts
 
-| Script                          | Purpose                                            |
-| ------------------------------- | -------------------------------------------------- |
-| `npm run dev`                   | Watch-mode server (`tsx watch`)                    |
-| `npm run build`                 | Emit to `dist/` (`tsconfig.build.json`)            |
-| `npm start`                     | Run the compiled server                            |
-| `npm run typecheck`             | `tsc --noEmit` over `src` and `tests`              |
-| `npm run lint`                  | ESLint, including the module import-boundary rules |
-| `npm test`                      | Vitest (unit + API + integration)                  |
-| `npm run prisma:migrate`        | Create and apply a migration in development        |
-| `npm run prisma:migrate:deploy` | Apply pending migrations (CI / production)         |
+| Script                            | Purpose                                                             |
+| --------------------------------- | ------------------------------------------------------------------- |
+| `npm run dev`                     | Watch-mode server (`tsx watch`)                                     |
+| `npm run dev:worker`              | Watch-mode worker: schedulers only, no HTTP (`PROCESS_ROLE=worker`) |
+| `npm run build`                   | Emit to `dist/` (`tsconfig.build.json`)                             |
+| `npm start`                       | Run the compiled server (`PROCESS_ROLE=all` or `api`)               |
+| `npm run start:worker`            | Run the compiled worker: schedulers only, no HTTP                   |
+| `npm run operator:reset-password` | Recover a lost platform-operator password (guarded, audited)        |
+| `npm run typecheck`               | `tsc --noEmit` over `src` and `tests`                               |
+| `npm run lint`                    | ESLint, including the module import-boundary rules                  |
+| `npm test`                        | Vitest (unit + API + integration)                                   |
+| `npm run prisma:migrate`          | Create and apply a migration in development                         |
+| `npm run prisma:migrate:deploy`   | Apply pending migrations (CI / production)                          |
+| `npm run prisma:seed`             | Seed reference data: roles, permissions, templates (idempotent)     |
+| `npm run bootstrap:operator`      | Create the first platform operator (refuses if one exists)          |
 
 ---
 

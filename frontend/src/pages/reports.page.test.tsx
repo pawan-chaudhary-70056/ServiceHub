@@ -101,6 +101,28 @@ describe('ReportsPage', () => {
     expect(screen.getByText('7')).toBeInTheDocument();
   });
 
+  it('renders the duration metrics with what each one measures (docs/30 §3.3)', async () => {
+    const user = userEvent.setup();
+    renderReports();
+
+    // `requests.resolution`: working minutes are shown *beside* the elapsed pair, because a
+    // working-time figure alone hides how much of the interval a calendar removed.
+    await user.selectOptions(await screen.findByLabelText('Report'), 'requests.resolution');
+    expect(await screen.findByText('Mean (working)')).toBeInTheDocument();
+    expect(screen.getByText('Median elapsed')).toBeInTheDocument();
+    expect(screen.getByText('Calendars used')).toBeInTheDocument();
+
+    // `approvals.turnaround`: the backlog is a snapshot at generation time, and says so.
+    await user.selectOptions(screen.getByLabelText('Report'), 'approvals.turnaround');
+    expect(await screen.findByText('Awaiting decision')).toBeInTheDocument();
+    expect(screen.getByText('Past deadline')).toBeInTheDocument();
+
+    // `incidents.mttr`: the reopen rate sits beside the reopen-aware average.
+    await user.selectOptions(screen.getByLabelText('Report'), 'incidents.mttr');
+    expect(await screen.findByText('Mean time to resolve')).toBeInTheDocument();
+    expect(screen.getByText('Reopen rate')).toBeInTheDocument();
+  });
+
   it('queues an export and offers a download once it succeeds', async () => {
     const user = userEvent.setup();
     requestReportExport.mockClear();

@@ -128,7 +128,7 @@ Each milestone is expressed as **demonstrable capabilities**, never as dates:
 | M1 Contracts frozen | Docs `03`–`19` approved; decisions closed |
 | M2 Walk-through | A request flows raise → approve → resolve → notify with an audit trail |
 | M3 Core complete | Four E2E journeys pass; SLA examples pass; security tests pass |
-| M4 Extended complete | KB, assets, attachments, integrations, reporting live — KB, assets and reporting are live (`43` increments 14/16); **file attachments** (`19`, F-16 — the one feature in `05` with no code) are live (`43` increment 23); integrations (`32`, `Approved` 2026-10-08) are **partially** live: outbound webhooks (`43` increment 18), inbound webhooks (`43` increment 19), the admin UI and health board (`43` increments 20/21) inbound roster sync (`43` increment 22), the reliability patterns (circuit breaker, bulkhead) and the `admin:config` configuration surface (`43` increment 26) are implemented; the asynchronous antivirus hook behind the upload scan step (`19` §7.2), the N8 provider webhooks, per-identity rate-limit keying and the separate worker process remain |
+| M4 Extended complete | KB, assets, attachments, integrations, reporting live — KB, assets and reporting are live (`43` increments 14/16); **file attachments** (`19`, F-16 — the one feature in `05` with no code) are live (`43` increment 23); integrations (`32`, `Approved` 2026-10-08) are **partially** live: outbound webhooks (`43` increment 18), inbound webhooks (`43` increment 19), the admin UI and health board (`43` increments 20/21) inbound roster sync (`43` increment 22), the reliability patterns (circuit breaker, bulkhead) and the `admin:config` configuration surface (`43` increment 26), the separate worker process (`43` increment 28), and — closing the line — the N8 provider delivery webhooks (`29` N8) and the asynchronous antivirus scan step (`19` §7.2, `43` increment 31) are implemented, so the `integrations` line is **complete**; **the reporting line closed too** — the three duration metrics (`22`/`23`/`26`) and the `30` §3.4 dashboard aggregate cache that `30` §3.4's strategy table called for are live (`43` increment 33), and the two concurrency acceptance criteria behind them are verified tests (`22` §14 AC4, `26` §14 AC5); per-identity rate-limit keying remains elsewhere in M4 |
 | M5 Production ready | Security review, load targets, DR rehearsal, a11y audit passed |
 
 Traceability: each capability maps to a functional requirement (`02`), a contract
@@ -263,9 +263,27 @@ consumer" item open since increment 3 — and a worker that is refused, not star
 to serve HTTP (`03` §3). Increment 29 migrated report and audit exports to **object storage**
 (`ADR-0004`, `19` §7.1/§7.3) and dropped `report_exports.content`, which **supersedes
 `CR-0003`** and resolves the last "object-storage adapter for report exports" line. What
-remains for M4: the time-based report metrics and cached aggregates, the N8 provider webhooks,
-per-identity rate-limit keying, the asynchronous antivirus hook, and the whole of Phase 4
+remains for M4: the time-based report metrics and cached aggregates, and per-identity
+rate-limit keying. **Increment 31 closed the N8 provider webhooks and the asynchronous
+antivirus scan step**, so M4's `integrations` line is no longer partial — it is complete.
+M4's `reporting` line stays partial on the first of those, and the whole of Phase 4
 (SAST/DAST/pentest runs against a deployed environment, load validation against `02` D-7, DR
-rehearsal, accessibility audit, browser E2E journeys). M4's `reporting` line stays partial on
-the first two of those; its `integrations` line is partial only for the N8 provider webhooks
-and the antivirus hook.
+rehearsal, accessibility audit, browser E2E journeys) is untouched.
+
+**Increment 32 closed the largest hole in an area that had been reported as "done".** SLA
+Management (`25`, F-08) was marked complete on the strength of its *arithmetic* — frozen
+targets, pause/resume, DST, leader-elected sweeps, worked examples — and that arithmetic was
+indeed complete and tested. What did not exist was any way to **see** it: `25` §11's
+`/sla/clocks/...` endpoints were absent, no response carried a clock, so §12's "state plus time
+remaining" had no implementation and `22` §14 AC5 (SLA state in the list) could not be met by
+any client. `sla:clock:override` sat in the permission catalogue enforced by nothing. Increment
+32 delivers the read surface, the override (reason mandatory, `sla.clock.override` audited,
+breach clearing recorded rather than erased), the projection into every request and incident
+response including the lists, the indicator that reads the shared tone map, and an `/admin/sla`
+configuration page — so the SLA area is now a working feature rather than a computed one. What
+remains on that line is `PATCH /sla/calendars/{id}`: a calendar change is currently a new
+calendar rather than a new *version* of the same one (`25` §4 rule 6). The area-by-area review
+that produced this increment also leaves one question open for `30`: `21` §10/§14 AC5 (catalog
+caching with mutation invalidation) is still unimplemented, and the concurrency-flavoured
+acceptance criteria in `22` (parallel reference allocation) and `26` (concurrent decisions) are
+implemented but never exercised concurrently by a test.

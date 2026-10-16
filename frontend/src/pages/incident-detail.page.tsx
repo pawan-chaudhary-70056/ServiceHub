@@ -20,6 +20,8 @@ import {
 import { AttachmentPanel } from '../components/attachment-panel';
 import { KnowledgePanel } from '../components/knowledge-panel';
 import { RecordHistoryPanel } from '../components/record-history-panel';
+import { SlaIndicator } from '../components/sla-indicator';
+import { SlaOverrideForm } from '../components/sla-override-form';
 import { StatusBadge } from '../components/status-badge';
 import { TasksPanel } from '../components/tasks-panel';
 import { useAuth } from '../hooks/auth-context';
@@ -146,6 +148,9 @@ export function IncidentDetailPage() {
             </h1>
           </div>
           <div className="flex items-center gap-2">
+            {/* docs/25 §12: state plus time remaining in the header, so the responder sees
+                how urgent this is before reading anything else. */}
+            <SlaIndicator sla={data.sla} />
             <StatusBadge tone={priorityTone(data.priority)}>{data.priority}</StatusBadge>
             <StatusBadge tone={incidentStatusTone(data.status)}>{data.status}</StatusBadge>
           </div>
@@ -176,7 +181,21 @@ export function IncidentDetailPage() {
           <Fact label="Assignee" value={data.assignee?.displayName ?? 'Unassigned'} />
           <Fact label="Team" value={data.team?.name ?? '—'} />
           <Fact label="SLA policy" value={data.slaPolicy.name} />
+          <Fact
+            label="SLA target"
+            value={data.sla ? new Date(data.sla.targetAt).toLocaleString() : 'No live clock'}
+          />
         </dl>
+
+        {/* The only way a deadline moves by hand (docs/25 §11), offered to a caller the
+            server would accept: the reason is mandatory and recorded with the before and
+            after instants. */}
+        {data.sla && hasPermission('sla:clock:override') && (
+          <div className="mt-4 border-t border-border pt-4">
+            <SlaOverrideForm clock={data.sla} onOverridden={refresh} />
+          </div>
+        )}
+
         {data.resolutionSummary && (
           <div className="mt-4 border-t border-border pt-4">
             <dt className="text-xs font-medium uppercase tracking-wide text-content-muted">
@@ -231,10 +250,13 @@ export function IncidentDetailPage() {
               }
             }}
           >
-            <label className="block text-sm font-medium text-content">
+            {/* The label is a sibling of its control, so it must be associated by
+                `htmlFor`/`id` — otherwise the field has no accessible name (docs/16). */}
+            <label htmlFor="resolution-summary" className="block text-sm font-medium text-content">
               Resolution summary (required)
             </label>
             <textarea
+              id="resolution-summary"
               value={resolution}
               onChange={(event) => setResolution(event.target.value)}
               rows={3}
@@ -260,10 +282,11 @@ export function IncidentDetailPage() {
               setReopenReason('');
             }}
           >
-            <label className="block text-sm font-medium text-content">
+            <label htmlFor="reopen-reason" className="block text-sm font-medium text-content">
               Reason (required only outside the reopen window)
             </label>
             <textarea
+              id="reopen-reason"
               value={reopenReason}
               onChange={(event) => setReopenReason(event.target.value)}
               rows={2}

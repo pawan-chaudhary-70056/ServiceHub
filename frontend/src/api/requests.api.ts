@@ -1,4 +1,5 @@
 import { apiRequest } from './client';
+import type { SlaClock } from './sla.api';
 
 /**
  * Service request API (docs/22 §11, docs/11 §9).
@@ -38,6 +39,12 @@ export interface RequestSummary {
   requesterName: string;
   assigneeName: string | null;
   slaPolicyName: string;
+  /**
+   * The live clock, or null for a record with none (`docs/25` §12). `docs/22` §14 AC5 needs
+   * the SLA state in the **list**, which is why this is on the summary and not only on the
+   * detail.
+   */
+  sla: SlaClock | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -49,11 +56,14 @@ export interface RequestDetail {
   description: string | null;
   status: RequestStatus;
   priority: Priority;
-  catalogItem: { id: string; name: string };
+  /** `requiresApproval` decides whether the approval transition is offered (docs/22 §3). */
+  catalogItem: { id: string; name: string; requiresApproval: boolean };
   requester: { id: string; displayName: string };
   assignee: { id: string; displayName: string } | null;
   team: { id: string; name: string } | null;
   slaPolicy: { id: string; name: string };
+  /** The live clock (state plus time remaining), or null when the clock has stopped. */
+  sla: SlaClock | null;
   fields: Array<{
     key: string;
     label: string;

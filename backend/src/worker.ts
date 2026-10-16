@@ -7,6 +7,8 @@ import { processRole, runsSchedulers, servesHttp } from './config';
 import { disconnectRedis } from './integrations/redis';
 import { disconnectDatabase } from './models';
 import {
+  registerNotificationProviderHandlers,
+  startAttachmentScanScheduler,
   startInboundWebhookScheduler,
   startNotificationScheduler,
   startReportExportScheduler,
@@ -56,7 +58,12 @@ if (!runsSchedulers(processRole)) {
 
 logger.info({ PROCESS_ROLE: processRole }, 'ServiceHub worker starting');
 
-// The same six schedulers `server.ts` starts, in one place so the two entrypoints cannot drift.
+// Provider delivery webhooks (`docs/29` N8) are dispatched by the inbound worker below, so
+// the handlers must exist before its first tick. Registration is explicit here because the
+// registry is consulted only by the process that runs that worker.
+registerNotificationProviderHandlers();
+
+// The same seven schedulers `server.ts` starts, in one place so the two entrypoints cannot drift.
 const schedulers = [
   startSlaSweepScheduler(),
   startNotificationScheduler(),
@@ -64,6 +71,9 @@ const schedulers = [
   startWebhookScheduler(),
   startInboundWebhookScheduler(),
   startRosterSyncScheduler(),
+  // The antivirus scan step (`docs/19` §7.2). A no-op unless a scanner is configured; it is
+  // what promotes an uploaded attachment from PENDING to retrievable.
+  startAttachmentScanScheduler(),
 ];
 
 /**

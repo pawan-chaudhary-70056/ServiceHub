@@ -133,6 +133,11 @@ export function AppShell({ children }: AppShellProps) {
                     Approval templates
                   </Link>
                 )}
+                {hasPermission('sla:policy:manage') && (
+                  <Link to="/admin/sla" className="text-content-muted hover:text-content">
+                    SLA
+                  </Link>
+                )}
                 {hasPermission('integration:read') && (
                   <Link to="/admin/integrations" className="text-content-muted hover:text-content">
                     Integrations
@@ -167,8 +172,7 @@ export function AppShell({ children }: AppShellProps) {
 
       <footer className="border-t border-border bg-surface-muted">
         <div className="mx-auto max-w-7xl px-4 py-4 text-xs text-content-muted">
-          Scaffold build — domain features are added as their documents reach{' '}
-          <span className="font-mono">Approved</span> at the phase gate.
+          ServiceHub — every state change is recorded in the audit log (docs/31).
         </div>
       </footer>
     </div>

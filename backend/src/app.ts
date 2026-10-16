@@ -133,9 +133,10 @@ export function createApp(): Express {
   // outage (docs/34 §6).
   app.use(`${API_PREFIX}/health`, probeRouter);
 
-  // Application-layer rate limiting. NOTE: this scaffold implementation counts in
-  // process memory, so limits multiply across instances — it must move to the Redis
-  // store chosen by `ADR-0003` before production (docs/33 §6, see rate-limit.ts).
+  // Application-layer rate limiting. Counters live in the shared Redis store, so the limit
+  // holds across instances rather than multiplying by the instance count; the in-memory
+  // store is used only when Redis is unconfigured, which is a local/test case (docs/33 §6,
+  // `ADR-0003` — see rate-limit.ts for the degradation and failure policy).
   app.use(
     API_PREFIX,
     createRateLimiter({

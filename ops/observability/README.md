@@ -33,7 +33,15 @@ The application exposes two families the rules depend on:
 - **Worker liveness** — `servicehub_job_last_success_timestamp_seconds` per job, which is what
   turns "the queue is not moving" into an alert. Every scheduled worker records a run:
   `sla_sweep`, `notification_drain`, `report_export`, `webhook_delivery`, `inbound_webhook`,
-  `roster_sync`.
+  `roster_sync`, `attachment_scan`.
+
+  The `ServiceHubWorkerStalled` rule watches four of the seven on purpose: `roster_sync` and
+  `attachment_scan` are no-ops when their integration is unconfigured, so a stall alert for
+  them would fire permanently in a perfectly valid stack — `ServiceHubSlaSweepStalled` covers
+  `sla_sweep`, whose silent failure is the one that needs paging. **If you run an antivirus
+  scanner (`ANTIVIRUS_URL`), add `attachment_scan` to that rule's `job=~` matcher**, because a
+  scan worker that stops promoting files is otherwise invisible: uploads simply never become
+  retrievable. Failures from every job are covered either way by `ServiceHubJobFailing`.
 - **Integration reliability** — `servicehub_integration_circuit_state` (0 closed, 1 half-open,
   2 open) and the `…_bulkhead_in_flight` / `…_bulkhead_queued` gauges (`docs/32` §8).
 

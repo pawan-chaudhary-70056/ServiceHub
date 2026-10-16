@@ -106,7 +106,8 @@ capacity plan; vague pooling is how a healthy database dies at 3 a.m.
 | SLA policies/calendars (read path) | minutes | on policy/calendar change |
 | Permissions/roles for a user | short | on role change; **bounded staleness stated** |
 | Published KB articles | minutes | on publish/archive/visibility change (`27`) |
-| Dashboard aggregates, reference lists | short | on relevant write class |
+| Dashboard aggregates (`30` §3.4) | short (60 s, `REPORT_CACHE_TTL_SECONDS`) | on write of the class the metric reads (`report-cache.ts`; `43` increment 33) |
+| Reference lists (catalog, SLA policies, KB) | short–minutes | on the mutation that changes the list |
 | Session lookups (server-side sessions, `ADR-0001`) | session lifetime | on logout/revocation |
 
 ### 5.2 Rules

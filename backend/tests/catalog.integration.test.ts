@@ -390,4 +390,214 @@ describe('service catalog and SLA configuration', () => {
     expect(duplicate.status).toBe(409);
     expect(duplicate.body.code).toBe('DUPLICATE');
   });
+
+  dbIt('invalidates both cached list regions on a mutation (docs/21 §12 AC5)', async () => {
+    // Warm both regions through the API — the reads a browser makes on page load.
+    const treeBefore = await request(app)
+      .get(`${BASE}/catalog/categories`)
+      .set('cookie', admin.cookie);
+    expect(treeBefore.status).toBe(200);
+
+    const requesterBefore = await request(app)
+      .get(`${BASE}/catalog/items`)
+      .set('cookie', requester.cookie);
+    expect(requesterBefore.status).toBe(200);
+    const visibleBefore = (requesterBefore.body.items as Array<{ id: string }>).map(
+      (row) => row.id,
+    );
+
+    // 1. A category mutation invalidates the tree: the very next read shows the new
+    //    node. Without invalidation this would be a cache hit on the warm entry.
+    const created = await request(app)
+      .post(`${BASE}/catalog/categories`)
+      .set('cookie', admin.cookie)
+      .set('x-csrf-token', admin.csrf)
+      .send({ name: 'Software' });
+    expect(created.status).toBe(201);
+
+    const treeAfter = await request(app)
+      .get(`${BASE}/catalog/categories`)
+      .set('cookie', admin.cookie);
+    expect((treeAfter.body.items as Array<{ name: string }>).map((row) => row.name)).toContain(
+      'Software',
+    );
+
+    // 2. An item create invalidates the item region: the requester's own view is
+    //    reloaded and still excludes the DRAFT row (C1: viewer class is in the key).
+    const drafted = await request(app)
+      .post(`${BASE}/catalog/items`)
+      .set('cookie', admin.cookie)
+      .set('x-csrf-token', admin.csrf)
+      .send({
+        categoryId: rootCategoryId,
+        name: 'Second laptop',
+        description: null,
+        defaultSlaPolicyId: defaultPolicyId,
+        fulfilmentTeamId,
+        requiresApproval: false,
+        fields: [],
+      });
+    expect(drafted.status).toBe(201);
+    const secondItemId = drafted.body.item.id;
+
+    const requesterMid = await request(app)
+      .get(`${BASE}/catalog/items`)
+      .set('cookie', requester.cookie);
+    expect((requesterMid.body.items as Array<{ id: string }>).map((row) => row.id)).not.toContain(
+      secondItemId,
+    );
+
+    // 3. Activation invalidates again: the requester's freshly cached page must not
+    //    survive the status change. This is the assertion that fails without C3.
+    const activated = await request(app)
+      .post(`${BASE}/catalog/items/${secondItemId}/activate`)
+      .set('cookie', admin.cookie)
+      .set('x-csrf-token', admin.csrf);
+    expect(activated.status).toBe(200);
+
+    const requesterAfter = await request(app)
+      .get(`${BASE}/catalog/items`)
+      .set('cookie', requester.cookie);
+    const visibleAfter = (requesterAfter.body.items as Array<{ id: string }>).map((row) => row.id);
+    expect(visibleAfter).toContain(secondItemId);
+    expect(visibleAfter).toEqual(expect.arrayContaining(visibleBefore));
+  });
+
+  dbIt(
+    'versions a calendar on edit: new row, old superseded, policies moved (25 §4 rule 6)',
+    async () => {
+      const before = await request(app).get(`${BASE}/sla/calendars`).set('cookie', admin.cookie);
+      expect(before.status).toBe(200);
+      const current = (
+        before.body.items as Array<{ id: string; name: string; version: number }>
+      ).find((calendar) => calendar.version === 1);
+      expect(current).toBeDefined();
+
+      // A second calendar, so a rename collision has something to collide with.
+      const second = await request(app)
+        .post(`${BASE}/sla/calendars`)
+        .set('cookie', admin.cookie)
+        .set('x-csrf-token', admin.csrf)
+        .send({
+          name: 'Follow The Sun',
+          timeZone: 'UTC',
+          model: 'WALL_CLOCK',
+          workingHours: { mon: [{ start: '00:00', end: '23:59' }] },
+          holidays: [],
+        });
+      expect(second.status).toBe(201);
+
+      // A clock row standing in for a record started under version 1: the edit below must
+      // not touch it (docs/25 §4 example 5, §14 AC4).
+      const inFlight = await prisma.slaClock.create({
+        data: {
+          organizationId,
+          entityType: 'ServiceRequest',
+          entityId: 'req-in-flight-cal-edit',
+          slaPolicyId: defaultPolicyId,
+          priority: 'HIGH',
+          cycle: 1,
+          startedAt: new Date('2026-10-12T09:00:00Z'),
+          targetAt: new Date('2026-10-16T17:00:00Z'),
+          warnAt: new Date('2026-10-16T13:00:00Z'),
+        },
+      });
+
+      // 1. The edit creates version 2 of the *same* calendar — same identity, new row.
+      const patched = await request(app)
+        .patch(`${BASE}/sla/calendars/${current?.id}`)
+        .set('cookie', admin.cookie)
+        .set('x-csrf-token', admin.csrf)
+        .send({ timeZone: 'Europe/Paris', holidays: ['2026-12-25'] });
+      expect(patched.status).toBe(200);
+      expect(patched.body.calendar.id).not.toBe(current?.id);
+      expect(patched.body.calendar.name).toBe(current?.name);
+      expect(patched.body.calendar.version).toBe(2);
+      expect(patched.body.calendar.timeZone).toBe('Europe/Paris');
+      expect(patched.body.calendar.isActive).toBe(true);
+
+      // 2. Both versions remain addressable; version 1 is superseded, not deleted.
+      const after = await request(app).get(`${BASE}/sla/calendars`).set('cookie', admin.cookie);
+      const lineage = (
+        after.body.items as Array<{
+          id: string;
+          name: string;
+          version: number;
+          isActive: boolean;
+        }>
+      ).filter((calendar) => calendar.name === current?.name);
+      expect(lineage).toHaveLength(2);
+      expect(lineage.find((calendar) => calendar.version === 1)?.isActive).toBe(false);
+      expect(lineage.find((calendar) => calendar.version === 2)?.isActive).toBe(true);
+
+      // 3. Policies move to the successor, so *new* records use the new version (25 §13).
+      const policies = await request(app).get(`${BASE}/sla/policies`).set('cookie', admin.cookie);
+      const defaultPolicy = (
+        policies.body.items as Array<{
+          id: string;
+          calendar: { id: string; version: number };
+        }>
+      ).find((policy) => policy.id === defaultPolicyId);
+      expect(defaultPolicy?.calendar.id).toBe(patched.body.calendar.id);
+      expect(defaultPolicy?.calendar.version).toBe(2);
+
+      // 4. The in-flight record's frozen instants are untouched (25 §14 AC4).
+      const stillFrozen = await prisma.slaClock.findUniqueOrThrow({ where: { id: inFlight.id } });
+      expect(stillFrozen.targetAt.getTime()).toBe(inFlight.targetAt.getTime());
+      expect(stillFrozen.warnAt.getTime()).toBe(inFlight.warnAt.getTime());
+
+      // 5. The edit is in the audit trail (25 §14 AC8's principle, applied here).
+      const audited = await prisma.auditLog.findFirst({
+        where: { action: 'sla.calendar.update' },
+        orderBy: { occurredAt: 'desc' },
+      });
+      expect(audited).not.toBeNull();
+      expect(audited?.entityId).toBe(current?.id);
+
+      // 6. A superseded version is not editable: the client would be editing a version no
+      //    new record will ever use.
+      const stale = await request(app)
+        .patch(`${BASE}/sla/calendars/${current?.id}`)
+        .set('cookie', admin.cookie)
+        .set('x-csrf-token', admin.csrf)
+        .send({ timeZone: 'Europe/London' });
+      expect(stale.status).toBe(409);
+      expect(stale.body.code).toBe('CONFLICT');
+
+      // 7. Renaming onto another calendar's name is refused; a version number does not
+      //    make a duplicate name a different calendar.
+      const rename = await request(app)
+        .patch(`${BASE}/sla/calendars/${patched.body.calendar.id}`)
+        .set('cookie', admin.cookie)
+        .set('x-csrf-token', admin.csrf)
+        .send({ name: 'Follow The Sun' });
+      expect(rename.status).toBe(409);
+      expect(rename.body.code).toBe('DUPLICATE');
+
+      // 8. An empty edit is not a version.
+      const empty = await request(app)
+        .patch(`${BASE}/sla/calendars/${patched.body.calendar.id}`)
+        .set('cookie', admin.cookie)
+        .set('x-csrf-token', admin.csrf)
+        .send({});
+      expect(empty.status).toBe(422);
+      expect(empty.body.code).toBe('VALIDATION_FAILED');
+    },
+  );
+
+  dbIt('refuses a calendar edit to a caller without sla:policy:manage', async () => {
+    const calendars = await request(app).get(`${BASE}/sla/calendars`).set('cookie', admin.cookie);
+    const current = (calendars.body.items as Array<{ id: string; version: number }>).find(
+      (calendar) => calendar.version >= 2,
+    );
+    expect(current).toBeDefined();
+
+    const forbidden = await request(app)
+      .patch(`${BASE}/sla/calendars/${current?.id}`)
+      .set('cookie', requester.cookie)
+      .set('x-csrf-token', requester.csrf)
+      .send({ timeZone: 'UTC' });
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.body.code).toBe('FORBIDDEN');
+  });
 });

@@ -487,6 +487,187 @@ describe('Unified search and reporting', () => {
     );
   });
 
+  dbIt(
+    'reports mean/median request resolution from stored timestamps (30 §3.3, owner 22)',
+    async () => {
+      // Synthetic but fixed intervals: Alice resolved after 60 minutes, Bob after 180 —
+      // written to the stored columns so the figure is reproducible from them alone (R1).
+      const aliceRequest = await prisma.serviceRequest.findFirstOrThrow({
+        where: { reference: aliceReference },
+      });
+      const bobRequest = await prisma.serviceRequest.findFirstOrThrow({
+        where: { reference: bobReference },
+      });
+      const base = new Date(Date.now() - 10 * 3_600_000);
+      await prisma.serviceRequest.update({
+        where: { id: aliceRequest.id },
+        data: {
+          status: 'FULFILLED',
+          submittedAt: base,
+          resolvedAt: new Date(base.getTime() + 60 * 60_000),
+        },
+      });
+      await prisma.serviceRequest.update({
+        where: { id: bobRequest.id },
+        data: {
+          status: 'FULFILLED',
+          submittedAt: base,
+          resolvedAt: new Date(base.getTime() + 180 * 60_000),
+        },
+      });
+
+      const asAdmin = await request(app)
+        .get(`${BASE}/reports/requests.resolution`)
+        .set('cookie', admin.cookie);
+      expect(asAdmin.status).toBe(200);
+      const figures = asAdmin.body.report.figures as Record<string, unknown>;
+      expect(figures.resolvedCount).toBe(2);
+      // Elapsed minutes come straight from the two stored columns: median of [60, 180].
+      expect(figures.meanElapsedMinutes).toBe(120);
+      expect(figures.medianElapsedMinutes).toBe(120);
+      // Working minutes are the same interval with non-working time removed, so they can
+      // never exceed elapsed — the invariant that catches a double-counted exclusion.
+      expect(figures.meanMinutes as number).toBeLessThanOrEqual(
+        figures.meanElapsedMinutes as number,
+      );
+      // ADR-0008: the report states which calendar it measured against.
+      expect(Object.keys(figures.calendarsUsed as Record<string, number>)).toContain(
+        'Europe/London (WORKING_HOURS)',
+      );
+
+      // R3: Alice's own scope resolves to her one request, not the tenant's two.
+      const asAlice = await request(app)
+        .get(`${BASE}/reports/requests.resolution`)
+        .set('cookie', alice.cookie);
+      expect(asAlice.body.report.scope).toBe('own');
+      expect(asAlice.body.report.figures.resolvedCount).toBe(1);
+    },
+  );
+
+  dbIt('reports reopen-aware MTTR (docs/30 §3.3, owner 23)', async () => {
+    const first = await request(app)
+      .post(`${BASE}/incidents`)
+      .set('cookie', alice.cookie)
+      .set('x-csrf-token', alice.csrf)
+      .send({
+        title: 'VPN outage',
+        description: 'Nobody can reach the VPN.',
+        impact: 'MINOR',
+        urgency: 'LOW',
+      });
+    expect(first.status).toBe(201);
+    const reopenedIncident = await request(app)
+      .post(`${BASE}/incidents`)
+      .set('cookie', alice.cookie)
+      .set('x-csrf-token', alice.csrf)
+      .send({
+        title: 'Flaky build agent',
+        description: 'The CI agent drops jobs.',
+        impact: 'MINOR',
+        urgency: 'LOW',
+      });
+    expect(reopenedIncident.status).toBe(201);
+
+    // Incident 1: reported 5 h ago, resolved 4 h ago (60 minutes).
+    await prisma.incident.update({
+      where: { id: first.body.incident.id },
+      data: {
+        createdAt: new Date(Date.now() - 5 * 3_600_000),
+        resolvedAt: new Date(Date.now() - 4 * 3_600_000),
+        status: 'RESOLVED',
+        resolutionSummary: 'VPN configuration was reverted.',
+      },
+    });
+    // Incident 2: reported 5 h ago, reopened once, finally resolved 1 h ago — the full
+    // report-to-final-resolution time (240 minutes), not its first pass.
+    await prisma.incident.update({
+      where: { id: reopenedIncident.body.incident.id },
+      data: {
+        createdAt: new Date(Date.now() - 5 * 3_600_000),
+        resolvedAt: new Date(Date.now() - 1 * 3_600_000),
+        status: 'RESOLVED',
+        resolutionSummary: 'Agent restarted and jobs re-queued.',
+        reopenCount: 1,
+        isMajor: true,
+      },
+    });
+
+    const asAdmin = await request(app)
+      .get(`${BASE}/reports/incidents.mttr`)
+      .set('cookie', admin.cookie);
+    expect(asAdmin.status).toBe(200);
+    const figures = asAdmin.body.report.figures as Record<string, unknown>;
+    expect(figures.resolvedCount).toBe(2);
+    expect(figures.meanMinutes).toBe(150);
+    expect(figures.medianMinutes).toBe(150);
+    expect(figures.reopenedCount).toBe(1);
+    expect(figures.reopenRatePercent).toBe(50);
+    expect(figures.majorCount).toBe(1);
+  });
+
+  dbIt('reports approval turnaround and the undecided backlog (30 §3.3, owner 26)', async () => {
+    const adminUser = await prisma.user.findFirstOrThrow({ where: { email: ADMIN_EMAIL } });
+    const aliceRequest = await prisma.serviceRequest.findFirstOrThrow({
+      where: { reference: aliceReference },
+    });
+
+    const workflow = await prisma.approvalWorkflow.create({
+      data: { organizationId, requestId: aliceRequest.id },
+    });
+    // A step raised 2 h before its decision: 90 minutes of turnaround.
+    const decidedStep = await prisma.approvalStep.create({
+      data: {
+        workflowId: workflow.id,
+        stepOrder: 1,
+        mode: 'ANY',
+        status: 'COMPLETED',
+        createdAt: new Date(Date.now() - 2 * 3_600_000),
+      },
+    });
+    await prisma.approvalDecision.create({
+      data: {
+        organizationId,
+        workflowId: workflow.id,
+        stepId: decidedStep.id,
+        approverId: adminUser.id,
+        outcome: 'APPROVE',
+        decidedAt: new Date(Date.now() - 30 * 60_000),
+      },
+    });
+    // A queued step already past its deadline: the backlog is a snapshot (PENDING counts
+    // as undecided — it is queued behind an earlier step, not decided).
+    await prisma.approvalStep.create({
+      data: {
+        workflowId: workflow.id,
+        stepOrder: 2,
+        mode: 'ALL',
+        status: 'PENDING',
+        deadlineAt: new Date(Date.now() - 3_600_000),
+      },
+    });
+
+    const asAdmin = await request(app)
+      .get(`${BASE}/reports/approvals.turnaround`)
+      .set('cookie', admin.cookie);
+    expect(asAdmin.status).toBe(200);
+    const figures = asAdmin.body.report.figures as Record<string, unknown>;
+    expect(figures.decisionCount).toBe(1);
+    expect(figures.meanMinutes).toBe(90);
+    expect(figures.medianMinutes).toBe(90);
+    expect(figures.pending).toBeGreaterThanOrEqual(1);
+    expect(figures.overdue).toBe(1);
+
+    // R3: visibility is the *request's*. Bob can see neither Alice's decision nor her
+    // backlog — his figures are the empty set, not a narrowed tenant view.
+    const asBob = await request(app)
+      .get(`${BASE}/reports/approvals.turnaround`)
+      .set('cookie', bob.cookie);
+    expect(asBob.body.report.scope).toBe('own');
+    expect(asBob.body.report.figures.decisionCount).toBe(0);
+    expect(asBob.body.report.figures.pending).toBe(0);
+    expect(asBob.body.report.figures.overdue).toBe(0);
+  });
+
   dbIt('uses PostgreSQL full-text search with highlighting (docs/30 §2.2/§2.4)', async () => {
     const response = await request(app).get(`${BASE}/search?q=VPN`).set('cookie', admin.cookie);
     const body = response.body as SearchBody;
@@ -527,5 +708,83 @@ describe('Unified search and reporting', () => {
     expect(articles[0]?.indexdef).toContain('setweight');
     expect(articles[0]?.indexdef).toContain("'A'");
     expect(articles[0]?.indexdef).toContain("'B'");
+  });
+
+  dbIt('caches dashboard aggregates and invalidates them per class (docs/30 §3.4)', async () => {
+    // A period unique to this run and open into the near future, so rows created during the
+    // test are inside it and a previous run can never have populated the same key.
+    const from = new Date(Date.now() - 3_600_000).toISOString();
+    const to = new Date(Date.now() + 3_600_000).toISOString();
+    const window = `from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+    const summaryUrl = `${BASE}/reports/requests.summary?${window}`;
+    const workloadUrl = `${BASE}/reports/tasks.workload?${window}`;
+
+    const first = await request(app).get(summaryUrl).set('cookie', admin.cookie);
+    expect(first.status).toBe(200);
+    const firstGeneratedAt = first.body.report.generatedAt as string;
+    const countOf = (body: { report: { figures: { byStatus: Record<string, number> } } }) =>
+      Object.values(body.report.figures.byStatus).reduce((sum, n) => sum + n, 0);
+    const before = countOf(first.body);
+
+    // The second identical request is a cache hit: byte-identical payload, including the
+    // generation stamp, which only a fresh computation (`new Date()`) could move.
+    const second = await request(app).get(summaryUrl).set('cookie', admin.cookie);
+    expect(second.body.report.generatedAt).toBe(firstGeneratedAt);
+
+    // A write in the class the metric reads invalidates the entry after its commit: the new
+    // request is counted and the report is recomputed.
+    const created = await request(app)
+      .post(`${BASE}/requests`)
+      .set('cookie', alice.cookie)
+      .set('x-csrf-token', alice.csrf)
+      .send({ catalogItemId: itemId, title: 'Dashboards must not lie', fields: {} });
+    expect(created.status).toBe(201);
+
+    const afterWrite = await request(app).get(summaryUrl).set('cookie', admin.cookie);
+    expect(afterWrite.body.report.generatedAt).not.toBe(firstGeneratedAt);
+    expect(countOf(afterWrite.body)).toBe(before + 1);
+
+    // A write in a *different* class must leave this region alone (`§3.4`): the task load
+    // was cached before the request was raised and is still the same entry afterwards.
+    const tasksBefore = await request(app).get(workloadUrl).set('cookie', admin.cookie);
+    expect(tasksBefore.status).toBe(200);
+    const tasksAfter = await request(app).get(workloadUrl).set('cookie', admin.cookie);
+    expect(tasksAfter.body.report.generatedAt).toBe(tasksBefore.body.report.generatedAt);
+
+    // Scope is part of the key (`R3`): a requester's own-scope entry is never served to the
+    // admin's cross-team read, and the requester keeps getting their own answer back. Alice
+    // owns two requests in this window — her VPN one and the probe she just raised.
+    const asAlice = await request(app).get(summaryUrl).set('cookie', alice.cookie);
+    expect(asAlice.body.report.scope).toBe('own');
+    expect(asAlice.body.report.generatedAt).not.toBe(afterWrite.body.report.generatedAt);
+    expect(countOf(asAlice.body)).toBe(2);
+
+    const asAliceAgain = await request(app).get(summaryUrl).set('cookie', alice.cookie);
+    expect(asAliceAgain.body.report.generatedAt).toBe(asAlice.body.report.generatedAt);
+    expect(countOf(asAliceAgain.body)).toBe(2);
+  });
+
+  dbIt('invalidates the SLA figures when a clock is overridden (docs/30 §3.4)', async () => {
+    const url = `${BASE}/reports/sla.attainment`;
+    const first = await request(app).get(url).set('cookie', admin.cookie);
+    expect(first.status).toBe(200);
+    const clock = await prisma.slaClock.findFirstOrThrow({
+      where: { organizationId, breachedAt: null },
+    });
+
+    // An audited correction to a frozen target (`docs/25` §11) is a write in the SLA class,
+    // and it must not be served from the cached attainment figure.
+    const overridden = await request(app)
+      .post(`${BASE}/sla/clocks/${clock.id}/override`)
+      .set('cookie', admin.cookie)
+      .set('x-csrf-token', admin.csrf)
+      .send({
+        reason: 'Deadline extended by the change board.',
+        targetAt: new Date().toISOString(),
+      });
+    expect(overridden.status).toBe(200);
+
+    const second = await request(app).get(url).set('cookie', admin.cookie);
+    expect(second.body.report.generatedAt).not.toBe(first.body.report.generatedAt);
   });
 });

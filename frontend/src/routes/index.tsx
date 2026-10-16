@@ -1,12 +1,15 @@
 import { Route, Routes } from 'react-router-dom';
 import { RequireAuth } from '../components/require-auth';
 import { AcceptInvitationPage } from '../pages/accept-invitation.page';
+import { ForgotPasswordPage } from '../pages/forgot-password.page';
+import { ResetPasswordPage } from '../pages/reset-password.page';
 import { ApprovalTemplatesPage } from '../pages/approval-templates.page';
 import { ApprovalsPage } from '../pages/approvals.page';
 import { ArticlePage } from '../pages/article.page';
 import { AssetDetailPage } from '../pages/asset-detail.page';
 import { AuditPage } from '../pages/audit.page';
 import { SecurityActivityPage } from '../pages/security-activity.page';
+import { SlaPage } from '../pages/sla.page';
 import { AssetsPage } from '../pages/assets.page';
 import { CatalogPage } from '../pages/catalog.page';
 import { KbPage } from '../pages/kb.page';
@@ -46,10 +49,15 @@ export function AppRoutes() {
     <Routes>
       <Route path="/" element={<HomePage />} />
 
-      {/* Public identity routes: sign in, and the invitation link a new user follows
-          to establish their first credential (docs/06 §11). */}
+      {/* Public identity routes: sign in, the invitation link a new user follows to
+          establish their first credential (docs/06 §11), and the password-reset pair. */}
       <Route path="/login" element={<LoginPage />} />
       <Route path="/accept-invitation" element={<AcceptInvitationPage />} />
+      {/* The reset pair. `/reset-password` is **not** an arbitrary choice: it is the path
+          the server writes into the reset email (`services/auth.service.ts`), so moving it
+          silently breaks every reset link already in someone's inbox. */}
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
 
       {/* Platform administration. Guarded for a clear message; the server enforces the
           permission independently (docs/07 §5, ADR-0012). */}
@@ -226,6 +234,18 @@ export function AppRoutes() {
         element={
           <RequireAuth permission="admin:config">
             <ApprovalTemplatesPage />
+          </RequireAuth>
+        }
+      />
+
+      {/* SLA administration (docs/25 §12). Configuration is administrator work, guarded by
+          `sla:policy:manage`; clock state itself is read on the records that carry it, and
+          an override needs `sla:clock:override`, which the server enforces independently. */}
+      <Route
+        path="/admin/sla"
+        element={
+          <RequireAuth permission="sla:policy:manage">
+            <SlaPage />
           </RequireAuth>
         }
       />

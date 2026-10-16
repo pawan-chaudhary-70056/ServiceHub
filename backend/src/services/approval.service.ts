@@ -41,6 +41,7 @@ import {
 } from '../models';
 import { AUDIT_ACTION, AUDIT_ENTITY, OUTBOX_EVENT } from './audit-events';
 import type { RequestMeta } from './context';
+import { invalidateReportCache } from './report-cache';
 import { resumeClock } from './sla-clock.service';
 
 /**
@@ -392,6 +393,10 @@ export async function decideApprovalStep(
     await advanceOrFinalize(tx, workflow, step.stepOrder, actor, meta, now);
   });
 
+  // A decision moves the approval turnaround and backlog, and a final decision moves the
+  // request's own status and resumes its clock (`docs/30` §3.3, owners `26`, `22`, `25`).
+  await invalidateReportCache(organizationId, 'report.approvals', 'report.requests', 'report.sla');
+
   const fresh = await findWorkflowById(workflow.id);
   return { workflow: toWorkflowView(fresh as ApprovalWorkflowWithRelations), recorded: true };
 }
@@ -565,6 +570,10 @@ export async function reassignApprovalStep(
     );
   });
 
+  // Reassignment changes who is holding the decision, which is what the approval backlog
+  // and turnaround are about (`docs/30` §3.3, owner `26`).
+  await invalidateReportCache(workflow.organizationId, 'report.approvals');
+
   const fresh = await findWorkflowById(workflow.id);
   return toWorkflowView(fresh as ApprovalWorkflowWithRelations);
 }
@@ -599,6 +608,9 @@ export async function cancelWorkflowForRequest(
       tx,
     );
   });
+
+  // The cancelled steps leave the backlog snapshot (`docs/30` §3.3, owner `26`).
+  await invalidateReportCache(workflow.organizationId, 'report.approvals');
 }
 
 // ===========================================================================
